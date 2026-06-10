@@ -1,0 +1,10 @@
+# Capture settings applied to every camera. Empty fields are left unchanged.
+string resolution        # 1080p | 2.7K | 4K | 5.3K
+string fps               # 24 | 25 | 30 | 50 | 60 | 100 | 120 | 200 | 240
+string fov               # Wide | Linear | SuperView | MaxSuperView | HyperView | ...
+string hypersmooth       # Off | On | AutoBoost
+string wind_reduction    # Off | Auto | On
+string camera_mode       # Video | Photo | Timelapse
+---
+bool success
+string message
