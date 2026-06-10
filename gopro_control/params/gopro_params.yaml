@@ -1,9 +1,10 @@
 gopro_manager:
   ros__parameters:
     camera_labels: ["LEFT", "RIGHT"]   # assigned in discovery order (sorted by camera IP)
-    status_period: 2.0                 # [s] status + system-state publish period
-    watchdog_period: 3.0               # [s] recording health check period
+    tick_period: 2.0                   # [s] status publish + watchdog health-check period
     strikes_before_restart: 3          # consecutive "not recording" checks before a soft restart
     max_restart_attempts: 3            # soft restarts before declaring FAULT (mission compromised)
+    record_grace_period: 10.0          # [s] after start: encoder init time, watchdog stays quiet
+    restart_cooldown: 8.0              # [s] minimum delay between soft restarts of the same camera
     # NOTE: recovery is software-only (re-arm + start). Vbus power-cycling is
     # intentionally NOT done here -- cutting power can corrupt the SD card's FTL.

@@ -24,6 +24,7 @@ import os
 import re
 import socket
 import subprocess
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -35,7 +36,9 @@ HTTP_PORT = 8080
 ST_BATTERY_PRESENT = "1"
 ST_BUSY = "8"
 ST_ENCODING = "10"
-ST_SD = "33"          # 0=OK 1=full 2=removed 3=needs-format 4=busy
+ST_SD = "33"            # 0=OK 1=full 2=removed 3=needs-format 4=busy
+ST_REMAINING_PHOTOS = "34"
+ST_REMAINING_SEC = "35"  # remaining video seconds -- the RELIABLE "card usable" signal
 ST_SPACE_KB = "54"
 
 PRESET_GROUP_VIDEO = 1000
@@ -139,11 +142,20 @@ class GoPro:
         st = self.state()
         return bool(st and st.get(ST_ENCODING) == 1)
 
+    @staticmethod
+    def _sd_usable(st: dict | None) -> bool:
+        """Whether the SD card can actually be recorded to.
+        Hero 12 quirk (fw 02.32.70): status 33 stays 0 even with no card or an
+        unformatted/FTL-broken card -- the reliable signal is remaining video
+        time (35) / photos (34) dropping to 0. So require that, not just 33."""
+        if not st:
+            return False
+        if st.get(ST_SD) in (1, 2, 3):      # full / removed / needs-format
+            return False
+        return (st.get(ST_REMAINING_SEC) or 0) > 0 or (st.get(ST_REMAINING_PHOTOS) or 0) > 0
+
     def sd_present(self) -> bool:
-        # A removed/swapped card can still report status 33 == 0 from cache, so
-        # also require non-zero free space to call the SD usable.
-        st = self.state()
-        return bool(st and st.get(ST_SD) == 0 and (st.get(ST_SPACE_KB) or 0) > 0)
+        return self._sd_usable(self.state())
 
     def set_setting(self, setting_id: int, option: int) -> bool:
         """Apply one Open GoPro setting (resolution, fps, fov, ...)."""
@@ -179,7 +191,8 @@ class GoPro:
             "ip": self.ip,
             "reachable": st is not None,
             "recording": bool(st and st.get(ST_ENCODING) == 1),
-            "sd_ok": bool(st and st.get(ST_SD) == 0 and (st.get(ST_SPACE_KB) or 0) > 0),
+            "sd_ok": self._sd_usable(st),
+            "remaining_sec": (st.get(ST_REMAINING_SEC) if st else None),
             "can_power_cycle": self.can_power_cycle(),
         }
 
@@ -217,6 +230,35 @@ class GoPro:
         return f"<GoPro {self.label} ip={self.ip} hub={loc} iface={self.iface}>"
 
 
+def sync_datetime(cameras: list[GoPro]) -> dict[str, bool]:
+    """Set the SAME UTC timestamp on every camera at (nearly) the same instant.
+
+    Timestamp accuracy/agreement is the priority for the AUV: the GoPro clock has
+    1-second resolution, so we compute the time string ONCE and push that exact
+    string to all cameras through a barrier. Both cameras then store the same
+    second (they agree with each other -- what matters for re-aligning footage in
+    post), and it is as close to the Pi's true UTC time as the 1s resolution and
+    HTTP latency allow. Requires the Pi clock to be NTP-synced (see
+    system_clock_synced). tzone=0&dst=0 stores the UTC verbatim."""
+    if not cameras:
+        return {}
+    now = datetime.datetime.now(datetime.timezone.utc)
+    path = (f"/gopro/camera/set_date_time?date={now.strftime('%Y_%m_%d')}"
+            f"&time={now.strftime('%H_%M_%S')}&tzone=0&dst=0")
+    barrier = threading.Barrier(len(cameras), timeout=5)
+
+    def worker(cam):
+        try:
+            barrier.wait()
+        except threading.BrokenBarrierError:
+            pass
+        code, _ = cam._request(path, timeout=4)
+        return cam.label, code == 200
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(cameras)) as pool:
+        return dict(pool.map(worker, cameras))
+
+
 def system_clock_synced() -> bool:
     """True if the host clock is NTP-synchronized (so camera time will be right).
     Underwater the AUV loses the network, so sync must happen before diving."""
@@ -230,14 +272,24 @@ def system_clock_synced() -> bool:
 
 
 def set_recording(cameras: list[GoPro], start: bool) -> dict[str, bool]:
-    """Start or stop recording on all cameras as close to simultaneously as the
-    network allows, by firing the HTTP calls concurrently. Returns {label: ok}."""
+    """Start or stop recording on all cameras at (nearly) the same instant.
+    Each camera runs in its own thread and waits at a barrier, so every shutter
+    request leaves within ~1ms of the others instead of being staggered by the
+    order they were launched. Returns {label: ok}."""
     if not cameras:
         return {}
     action = (lambda c: c.start()) if start else (lambda c: c.stop())
+    barrier = threading.Barrier(len(cameras), timeout=5)
+
+    def worker(cam):
+        try:
+            barrier.wait()
+        except threading.BrokenBarrierError:
+            pass
+        return cam.label, action(cam)
+
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(cameras)) as pool:
-        results = pool.map(action, cameras)
-    return {cam.label: ok for cam, ok in zip(cameras, results)}
+        return dict(pool.map(worker, cameras))
 
 
 def discover(labels: list[str] | None = None) -> list[GoPro]:

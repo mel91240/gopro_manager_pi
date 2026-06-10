@@ -135,6 +135,9 @@ def main(args=None):
                 break
             else:
                 print('Unknown command.')
+
+            if choice in ('1', '2', '3'):
+                time.sleep(0.4)   # let the fresh system state arrive before redisplaying
     except (KeyboardInterrupt, EOFError):
         pass
     finally:
