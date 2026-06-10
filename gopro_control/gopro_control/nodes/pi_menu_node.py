@@ -51,11 +51,19 @@ class PiMenu(Node):
         return fut.result() if fut.done() else None
 
 
-def _status_line(sys_msg) -> str:
-    if sys_msg is None:
-        return 'state: (waiting for gopro_manager...)'
-    return (f"state: {sys_msg.state}  |  {sys_msg.num_recording}/{sys_msg.num_cameras} recording"
-            f"  |  {sys_msg.message}")
+def _status_line(s) -> str:
+    """Minimal, state-appropriate one-liner for the banner."""
+    if s is None:
+        return 'connecting to gopro_manager...'
+    if s.state == GoProSystem.STATE_RECORDING:
+        return f'RECORDING ({s.num_recording}/{s.num_cameras})'
+    if s.state == GoProSystem.STATE_DEGRADED:
+        return f'DEGRADED ({s.num_recording}/{s.num_cameras} recording, recovering)'
+    if s.state == GoProSystem.STATE_FAULT:
+        return f'FAULT ({s.message})'
+    if s.state == GoProSystem.STATE_READY:
+        return 'READY'
+    return s.state          # INITIALIZING
 
 
 def _choose(prompt, options, default):
@@ -103,7 +111,7 @@ def main(args=None):
     try:
         while True:
             print('\n=== AUV GoPro Master Control ===')
-            print(_status_line(node.system))
+            print('Status:', _status_line(node.system))
             print('  [1] Start recording')
             print('  [2] Stop recording')
             print('  [3] Change settings')
