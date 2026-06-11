@@ -238,14 +238,18 @@ class GoProManagerNode(Node):
             return True
         ok = cam.init()
         cam.set_datetime()
-        ready = ok and cam.shutter_works()
+        # Readiness check is NON-destructive: armed (init ok) + a usable SD card,
+        # WITHOUT a real shutter start/stop. A test recording stresses the USB
+        # link and can intermittently knock a marginal (USB3-cabled) camera off
+        # the bus -- the actual recording will be the operator's first shutter.
+        ready = ok and cam.sd_present()
         if ready:
             self._ready.add(cam.label)
             self._faulted.pop(cam.label, None)
-            self.get_logger().info(f'[{cam.label}] armed & verified.')
+            self.get_logger().info(f'[{cam.label}] armed & ready (SD ok).')
         else:
             self._ready.discard(cam.label)
-            self.get_logger().warn(f'[{cam.label}] NOT ready (init={ok}). Is the SD card formatted?')
+            self.get_logger().warn(f'[{cam.label}] NOT ready (init={ok}, sd={cam.sd_present()}).')
         return ready
 
     # =====================================================================
