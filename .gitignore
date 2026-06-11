@@ -5,3 +5,4 @@ install/
 log/
 *.egg-info/
 .gopro_ref
+.recording_intent

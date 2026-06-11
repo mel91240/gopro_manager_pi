@@ -23,6 +23,7 @@ barrier inside the core, so both cameras fire within ~1ms of each other.
 
 All camera I/O lives in gopro_control.core; this node is the ROS 2 wrapper.
 """
+import os
 import time
 
 import rclpy
@@ -50,6 +51,9 @@ class GoProManagerNode(Node):
         self.declare_parameter('restart_cooldown', 8.0)              # [s] between recovery attempts of a camera
         self.declare_parameter('fault_after', 30.0)                  # [s] a cam lost this long -> mission compromised
         self.declare_parameter('discovery_timeout', 20.0)            # [s] wait for all cams to enumerate at boot
+        self.declare_parameter('resume_on_restart', True)            # auto-resume recording after a reboot
+        self.declare_parameter(                                      # persists the "was recording" intent
+            'state_file', '/home/cosma_auv/swarm-vehicle/gopro_scripts/.recording_intent')
 
         self.labels = [str(x) for x in self.get_parameter('camera_labels').value]
         self.expected = len(self.labels)
@@ -58,6 +62,8 @@ class GoProManagerNode(Node):
         self.restart_cooldown = float(self.get_parameter('restart_cooldown').value)
         self.fault_after = float(self.get_parameter('fault_after').value)
         self.discovery_timeout = float(self.get_parameter('discovery_timeout').value)
+        self.resume_on_restart = bool(self.get_parameter('resume_on_restart').value)
+        self.state_file = str(self.get_parameter('state_file').value)
 
         # --- State -------------------------------------------------------
         self.cameras = []
@@ -136,7 +142,52 @@ class GoProManagerNode(Node):
             for c in self.cameras:
                 self._grace_until[c.label] = grace
             self.get_logger().info('Adopted an in-progress recording; watchdog now active.')
+        elif self.resume_on_restart and self._intent_recording() and self._ready:
+            # A reboot interrupted a mission (cameras stopped, but the intent flag
+            # says we were filming) -> resume recording autonomously on a new
+            # segment. Footage before the reboot is a separate (timestamped) file.
+            self.get_logger().warn('Recording intent set (reboot during a mission) -- RESUMING recording.')
+            self._resume_recording()
         self._publish(self._snapshot())
+
+    # =====================================================================
+    # Persistent recording intent (survives a reboot)
+    # =====================================================================
+    def _set_intent(self, recording: bool):
+        """Persist whether a mission recording is in progress, so that after a Pi
+        reboot the manager knows to resume filming (vs stay idle)."""
+        try:
+            if recording:
+                with open(self.state_file, 'w') as f:
+                    f.write('recording\n')
+            elif os.path.exists(self.state_file):
+                os.remove(self.state_file)
+        except OSError as e:
+            self.get_logger().warn(f'Could not update state file {self.state_file}: {e}')
+
+    def _intent_recording(self) -> bool:
+        return os.path.exists(self.state_file)
+
+    def _resume_recording(self):
+        """Auto-restart recording after a reboot, on the cameras that armed OK.
+        Any camera still down is left to the watchdog (and raises EMERGENCY if it
+        cannot be recovered), exactly like a drop during a live mission."""
+        ready_cams = [c for c in self.cameras if c.label in self._ready]
+        if not ready_cams:
+            return
+        time.sleep(1.5)                            # let cameras settle after the arm shutter-test,
+        #                                            otherwise some reject the immediate restart
+        sync_datetime(ready_cams)                  # same UTC second (barrier)
+        results = set_recording(ready_cams, True)
+        started = [lbl for lbl, ok in results.items() if ok]
+        self.recording = len(started) > 0
+        self._strikes = {c.label: 0 for c in self.cameras}
+        self._recovering.clear()
+        grace = time.monotonic() + self.grace_period
+        for c in self.cameras:
+            self._grace_until[c.label] = grace
+            self._cooldown_until[c.label] = 0.0
+        self.get_logger().info(f'Resumed recording on {started} (new segment after reboot).')
 
     def _arm(self, cam) -> bool:
         """Arm one camera for wired control, set its clock, verify it records.
@@ -182,6 +233,8 @@ class GoProManagerNode(Node):
             started = [lbl for lbl, ok in results.items() if ok]
 
             self.recording = len(started) > 0
+            if self.recording:
+                self._set_intent(True)          # remember it across a reboot -> auto-resume
             self._strikes = {c.label: 0 for c in self.cameras}
             self._recovering.clear()
             self._faulted.clear()
@@ -202,6 +255,7 @@ class GoProManagerNode(Node):
                 self.get_logger().warn('Stop requested but state says not recording -- sending stop anyway.')
             results = set_recording(self.cameras, False)
             self.recording = False
+            self._set_intent(False)       # clean stop -> do NOT auto-resume after a reboot
             self._recovering.clear()      # mission ended -- stop chasing dropped cams
             self._faulted.clear()
             failed = [lbl for lbl, ok in results.items() if not ok]
@@ -297,6 +351,12 @@ class GoProManagerNode(Node):
         self._cooldown_until[cam.label] = now + self.restart_cooldown
         if not cam.reachable(timeout=2):
             self.get_logger().warn(f'[{cam.label}] still disconnected -- will keep retrying.')
+            return
+        if cam.recording_now():
+            # It is actually recording already (a previous start finally took, or a
+            # transient bad read). Do NOT send another start -- that is the loud
+            # double-start beep. Just clear the drop state.
+            self._mark_healthy(cam)
             return
         if not cam.sd_present():
             self._faulted[cam.label] = 'SD missing/full/unformatted'
