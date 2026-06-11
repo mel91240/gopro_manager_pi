@@ -55,6 +55,25 @@ it **detects the in-progress recording and adopts it** rather than re-arming —
 so a reconnecting operator sees `RECORDING` and a second Start is refused on the
 manager side (never a loud beep from shutter-on-recording).
 
+## Watchdog & emergency signal (for the autonomy layer)
+
+While recording, the manager watches every camera each tick and publishes the
+overall state on `~/system`:
+
+- A camera that **stops/drops out** → state `DEGRADED`; the manager keeps trying
+  to recover it (re-arm out of "USB connected" + restart recording, **no power
+  cycling**). A camera that merely glitched or was briefly unplugged is recovered
+  as soon as it answers again, which clears the state back to `RECORDING`.
+- If a camera stays unrecoverable past `fault_after` (default 30 s), or is
+  reachable but its **SD is unusable**, the state becomes **`FAULT`** with a
+  `MISSION COMPROMISED -- ...` message. **`FAULT` is the emergency signal**: the
+  autonomy layer subscribes to `~/system` and, on `state == GoProSystem.STATE_FAULT`,
+  triggers the AUV emergency surface. The manager keeps retrying even in `FAULT`,
+  so the state clears itself if the camera ever comes back.
+
+The operator menu reflects this live (it refreshes the banner the moment the
+state changes, showing `DEGRADED` / `EMERGENCY` without needing a keypress).
+
 ## Deploy
 
 1. Copy both packages into the workspace (nothing else is touched):

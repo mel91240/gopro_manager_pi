@@ -7,6 +7,8 @@ over ROS 2 services and reads its published GoProSystem state.
 
     ros2 run gopro_control pi_menu
 """
+import select
+import sys
 import threading
 import time
 
@@ -58,12 +60,43 @@ def _status_line(s) -> str:
     if s.state == GoProSystem.STATE_RECORDING:
         return f'RECORDING ({s.num_recording}/{s.num_cameras})'
     if s.state == GoProSystem.STATE_DEGRADED:
-        return f'DEGRADED ({s.num_recording}/{s.num_cameras} recording, recovering)'
+        return f'DEGRADED -- {s.message}'
     if s.state == GoProSystem.STATE_FAULT:
-        return f'FAULT ({s.message})'
+        return f'EMERGENCY -- {s.message}'
     if s.state == GoProSystem.STATE_READY:
         return 'READY'
     return s.state          # INITIALIZING
+
+
+def _print_menu(node):
+    print('\n=== AUV GoPro Master Control ===')
+    print('Status:', _status_line(node.system))
+    print('  [1] Start recording')
+    print('  [2] Stop recording')
+    print('  [3] Change settings')
+    print('  [0] Exit')
+    print('Command: ', end='', flush=True)
+
+
+def _await_command(node, refresh=3.0):
+    """Wait for a command, but refresh the screen live if the manager's status
+    changes (a camera dropping out, recovery, EMERGENCY) so the operator sees it
+    immediately -- not only after pressing a key. Critical just before diving."""
+    last = _status_line(node.system)
+    while True:
+        ready, _, _ = select.select([sys.stdin], [], [], refresh)
+        if ready:
+            line = sys.stdin.readline()
+            if line == '':                       # EOF
+                raise EOFError
+            return line.strip()
+        cur = _status_line(node.system)
+        if cur != last:                          # state changed while idle -> redraw
+            last = cur
+            alert = node.system is not None and node.system.state in (
+                GoProSystem.STATE_DEGRADED, GoProSystem.STATE_FAULT)
+            print(('\a\n' if alert else '\n') + f'  >> status changed: {cur}')
+            _print_menu(node)
 
 
 def _choose(prompt, options, default):
@@ -121,13 +154,8 @@ def main(args=None):
 
     try:
         while True:
-            print('\n=== AUV GoPro Master Control ===')
-            print('Status:', _status_line(node.system))
-            print('  [1] Start recording')
-            print('  [2] Stop recording')
-            print('  [3] Change settings')
-            print('  [0] Exit')
-            choice = input('Command: ').strip()
+            _print_menu(node)
+            choice = _await_command(node)
 
             if choice == '1':
                 if node.system and node.system.recording:

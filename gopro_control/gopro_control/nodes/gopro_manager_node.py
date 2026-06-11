@@ -45,16 +45,16 @@ class GoProManagerNode(Node):
         # --- Parameters --------------------------------------------------
         self.declare_parameter('camera_labels', ['LEFT', 'RIGHT'])   # assigned in discovery order
         self.declare_parameter('tick_period', 2.0)                   # status publish + watchdog period [s]
-        self.declare_parameter('strikes_before_restart', 3)          # consecutive bad checks before acting
-        self.declare_parameter('max_restart_attempts', 3)            # soft restarts before declaring FAULT
+        self.declare_parameter('strikes_before_restart', 2)          # consecutive bad checks before acting
         self.declare_parameter('record_grace_period', 10.0)          # [s] after start: encoder init, watchdog waits
-        self.declare_parameter('restart_cooldown', 8.0)              # [s] between soft restarts of a camera
+        self.declare_parameter('restart_cooldown', 8.0)              # [s] between recovery attempts of a camera
+        self.declare_parameter('fault_after', 30.0)                  # [s] a cam lost this long -> mission compromised
 
         labels = [str(x) for x in self.get_parameter('camera_labels').value]
         self.strikes_max = int(self.get_parameter('strikes_before_restart').value)
-        self.max_restarts = int(self.get_parameter('max_restart_attempts').value)
         self.grace_period = float(self.get_parameter('record_grace_period').value)
         self.restart_cooldown = float(self.get_parameter('restart_cooldown').value)
+        self.fault_after = float(self.get_parameter('fault_after').value)
 
         # --- State -------------------------------------------------------
         self.cameras = discover(labels=labels)
@@ -62,10 +62,10 @@ class GoProManagerNode(Node):
         self.state = GoProSystem.STATE_INITIALIZING
         self.message = 'starting up'
         self._strikes = {c.label: 0 for c in self.cameras}
-        self._restart_attempts = {c.label: 0 for c in self.cameras}
         self._grace_until = {c.label: 0.0 for c in self.cameras}
         self._cooldown_until = {c.label: 0.0 for c in self.cameras}
-        self._faulted = {}          # label -> reason
+        self._recovering = {}       # label -> monotonic time it dropped (soft, being retried)
+        self._faulted = {}          # label -> reason (hard fault: reachable but SD unusable)
         self._ready = set()         # labels armed and verified
 
         if not self.cameras:
@@ -150,7 +150,7 @@ class GoProManagerNode(Node):
 
             self.recording = len(started) > 0
             self._strikes = {c.label: 0 for c in self.cameras}
-            self._restart_attempts = {c.label: 0 for c in self.cameras}
+            self._recovering.clear()
             self._faulted.clear()
             grace = time.monotonic() + self.grace_period   # encoder-init grace
             for c in self.cameras:
@@ -169,8 +169,12 @@ class GoProManagerNode(Node):
                 self.get_logger().warn('Stop requested but state says not recording -- sending stop anyway.')
             results = set_recording(self.cameras, False)
             self.recording = False
-            success = bool(results) and all(results.values())
-            msg = 'Recording STOPPED on all cameras.' if success else f'Stop result: {results}'
+            self._recovering.clear()      # mission ended -- stop chasing dropped cams
+            self._faulted.clear()
+            failed = [lbl for lbl, ok in results.items() if not ok]
+            success = not failed
+            msg = ('Recording STOPPED on all cameras.' if success
+                   else f'STOPPED; {failed} did not confirm (likely disconnected).')
 
         self._publish(self._snapshot())          # push the new state immediately (no lag)
         return self._reply(response, success, msg)
@@ -215,37 +219,52 @@ class GoProManagerNode(Node):
         if self.recording:
             now = time.monotonic()
             for cam, h in snapshot:
-                if cam.label in self._faulted or now < self._grace_until[cam.label]:
+                if now < self._grace_until[cam.label]:
                     continue
                 if h['recording']:
-                    self._strikes[cam.label] = 0
+                    self._mark_healthy(cam)
                     continue
-                if not h['sd_ok']:               # missing/full SD -> soft restart can't help
-                    self._faulted[cam.label] = 'SD missing/full/unformatted'
-                    self.get_logger().error(f'[{cam.label}] SD not usable -> mission compromised.')
-                    continue
+                # Camera dropped out of recording. Flag it right away (so the
+                # operator is warned live) and keep trying to recover it.
                 self._strikes[cam.label] += 1
-                self.get_logger().warn(f'[{cam.label}] not recording ({self._strikes[cam.label]}/{self.strikes_max})')
-                if self._strikes[cam.label] >= self.strikes_max and now >= self._cooldown_until[cam.label]:
-                    self._soft_restart(cam)
+                self._recovering.setdefault(cam.label, now)
+                if self._strikes[cam.label] == 1:
+                    self.get_logger().warn(
+                        f'[{cam.label}] stopped recording (reachable={h["reachable"]}) -- recovering.')
+                if (self._strikes[cam.label] >= self.strikes_max
+                        and now >= self._cooldown_until[cam.label]):
+                    self._recover(cam, now)
         self._publish(snapshot)
 
-    def _soft_restart(self, cam):
-        """Re-arm and restart recording on a dropped camera. No power cycling.
-        After max_restart_attempts failures the camera is declared FAULT."""
-        self._restart_attempts[cam.label] += 1
-        attempt = self._restart_attempts[cam.label]
-        self.get_logger().warn(f'[{cam.label}] soft restart (attempt {attempt}/{self.max_restarts})...')
+    def _mark_healthy(self, cam):
+        """Camera is recording again -- clear any drop/fault bookkeeping."""
+        if cam.label in self._recovering or cam.label in self._faulted:
+            self.get_logger().info(f'[{cam.label}] recording recovered.')
+        self._recovering.pop(cam.label, None)
+        self._faulted.pop(cam.label, None)
+        self._strikes[cam.label] = 0
+
+    def _recover(self, cam, now):
+        """Bring a dropped camera back: re-arm (out of USB-connected mode) and
+        restart recording. Never gives up while the mission is recording -- a
+        camera that was briefly unplugged is recovered as soon as it answers
+        again. No power cycling (would corrupt the SD). A reachable camera with
+        no usable SD cannot be fixed in software, so it is flagged as a hard
+        fault -- but still re-checked, in case the card is swapped back."""
+        self._cooldown_until[cam.label] = now + self.restart_cooldown
+        if not cam.reachable(timeout=2):
+            self.get_logger().warn(f'[{cam.label}] still disconnected -- will keep retrying.')
+            return
+        if not cam.sd_present():
+            self._faulted[cam.label] = 'SD missing/full/unformatted'
+            self.get_logger().error(f'[{cam.label}] reachable but SD unusable -> cannot record.')
+            return
+        self.get_logger().warn(f'[{cam.label}] reachable again -- re-arming and restarting recording...')
         cam.init()
         cam.set_datetime()
         cam.start()
-        self._cooldown_until[cam.label] = time.monotonic() + self.restart_cooldown
         if cam.encoding():
-            self._strikes[cam.label] = 0
-            self.get_logger().info(f'[{cam.label}] recording recovered.')
-        elif attempt >= self.max_restarts:
-            self._faulted[cam.label] = f'unrecoverable after {attempt} restarts'
-            self.get_logger().error(f'[{cam.label}] UNRECOVERABLE -> mission compromised.')
+            self._mark_healthy(cam)
 
     # =====================================================================
     # Snapshot + publish
@@ -263,16 +282,23 @@ class GoProManagerNode(Node):
                 can_power_cycle=h['can_power_cycle']))
 
         n = len(self.cameras)
+        now = time.monotonic()
         if self._faulted:
             self.state = GoProSystem.STATE_FAULT
             reasons = ', '.join(f'{k} ({v})' for k, v in sorted(self._faulted.items()))
             self.message = f'MISSION COMPROMISED -- {reasons}'
-        elif self.recording:
-            if recording_now == n:
-                self.state, self.message = GoProSystem.STATE_RECORDING, 'all cameras recording'
+        elif self._recovering:
+            labels = sorted(self._recovering)
+            worst = max(now - t for t in self._recovering.values())
+            if worst >= self.fault_after:        # down too long -> warn the surface
+                self.state = GoProSystem.STATE_FAULT
+                self.message = (f'MISSION COMPROMISED -- {labels} lost '
+                                f'{int(worst)}s (still retrying)')
             else:
                 self.state = GoProSystem.STATE_DEGRADED
-                self.message = f'{recording_now}/{n} recording, recovering'
+                self.message = f'{recording_now}/{n} recording, recovering {labels}'
+        elif self.recording:
+            self.state, self.message = GoProSystem.STATE_RECORDING, 'all cameras recording'
         elif n > 0 and len(self._ready) == n:
             self.state, self.message = GoProSystem.STATE_READY, 'all cameras ready to record'
         else:
