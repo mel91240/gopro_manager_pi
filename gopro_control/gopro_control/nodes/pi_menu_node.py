@@ -108,6 +108,12 @@ def main(args=None):
     spin_thread = threading.Thread(target=executor.spin, daemon=True)
     spin_thread.start()
 
+    # Wait briefly for the manager's first state so a reconnecting operator sees
+    # the real status (e.g. RECORDING) instead of "connecting..." on the first screen.
+    deadline = time.time() + 3.0
+    while node.system is None and time.time() < deadline:
+        time.sleep(0.1)
+
     try:
         while True:
             print('\n=== AUV GoPro Master Control ===')
@@ -119,8 +125,8 @@ def main(args=None):
             choice = input('Command: ').strip()
 
             if choice == '1':
-                if node.system and node.system.state == GoProSystem.STATE_RECORDING:
-                    print('Already recording.')
+                if node.system and node.system.recording:
+                    print('Already recording (stop with [2] before starting again).')
                     continue
                 if node.system and not node.system.all_ready:
                     if input('Cameras not all READY. Start anyway? (y/N): ').strip().lower() != 'y':
@@ -150,8 +156,10 @@ def main(args=None):
         pass
     finally:
         executor.shutdown()
+        spin_thread.join(timeout=2.0)     # let the spin thread exit before teardown
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':

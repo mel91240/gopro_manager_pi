@@ -142,6 +142,20 @@ class GoPro:
         st = self.state()
         return bool(st and st.get(ST_ENCODING) == 1)
 
+    def recording_now(self, retries: int = 4, delay: float = 0.6) -> bool:
+        """True if the camera is currently encoding, robust to a transient first
+        failure. Right after the manager (re)starts, the camera's HTTP server can
+        refuse the very first connection -- so we retry while it is unreachable
+        before concluding it is idle. This guards the "adopt an in-progress
+        recording" path: misjudging a recording camera as idle would re-arm it
+        (loud beep) and could stop the take."""
+        for _ in range(max(1, retries)):
+            st = self.state()
+            if st is not None:
+                return st.get(ST_ENCODING) == 1
+            time.sleep(delay)
+        return False
+
     @staticmethod
     def _sd_usable(st: dict | None) -> bool:
         """Whether the SD card can actually be recorded to.

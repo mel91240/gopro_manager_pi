@@ -95,10 +95,29 @@ class GoProManagerNode(Node):
             self.get_logger().warn('Pi clock not NTP-synced yet; camera time will be set at record time.')
         for cam in self.cameras:
             self._arm(cam)
+        if self.recording:
+            # We adopted an in-progress recording (manager restarted / operator
+            # reconnected mid-mission). Give the watchdog a grace period so it
+            # does not mistake the adoption moment for a dropout.
+            grace = time.monotonic() + self.grace_period
+            for c in self.cameras:
+                self._grace_until[c.label] = grace
+            self.get_logger().info('Adopted an in-progress recording; watchdog now active.')
         self._publish(self._snapshot())
 
     def _arm(self, cam) -> bool:
-        """Arm one camera for wired control, set its clock, verify it records."""
+        """Arm one camera for wired control, set its clock, verify it records.
+
+        If the camera is ALREADY recording (the manager was restarted while the
+        AUV is in the water, or the operator reconnected mid-mission), we must
+        NOT re-init or shutter-test it: that would beep loudly and could stop the
+        take. Instead we adopt its running state so the operator can stop it."""
+        if cam.recording_now():
+            self._ready.add(cam.label)
+            self._faulted.pop(cam.label, None)
+            self.recording = True
+            self.get_logger().info(f'[{cam.label}] already recording -- adopting state (no re-arm).')
+            return True
         ok = cam.init()
         cam.set_datetime()
         ready = ok and cam.shutter_works()

@@ -35,8 +35,25 @@ Node `gopro_manager` exposes (under its private namespace):
 - `~/record` — `std_srvs/SetBool` — `data: true` starts, `false` stops, on all cameras at once.
 - `~/settings` — `gopro_msgs/GoProSettings` — apply resolution/fps/fov/... to all cameras.
 - `~/status` — `gopro_msgs/GoProStatus` — per-camera health, published periodically.
+- `~/system` — `gopro_msgs/GoProSystem` — overall state (INITIALIZING/READY/RECORDING/DEGRADED/FAULT).
 
-Parameters live in `gopro_control/params/gopro_params.yaml`.
+## Operating on the AUV (mission flow)
+
+The **manager** and the **menu** run as two separate processes on purpose: the
+manager owns the cameras and must run for the whole mission (it survives SSH
+disconnect), while the menu is a thin client you open and close at will. See
+`scripts/README.md`. In short:
+
+```bash
+./scripts/manager_up.sh    # persistent manager (detached); arms the cameras
+./scripts/menu.sh          # operator menu: [1] start, [2] stop — open/close any time
+./scripts/manager_down.sh  # stop the manager, only after the footage is safe
+```
+
+If the manager is restarted while the cameras are recording (Pi reboot, crash),
+it **detects the in-progress recording and adopts it** rather than re-arming —
+so a reconnecting operator sees `RECORDING` and a second Start is refused on the
+manager side (never a loud beep from shutter-on-recording).
 
 ## Deploy
 
