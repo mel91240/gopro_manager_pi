@@ -238,18 +238,19 @@ class GoProManagerNode(Node):
             return True
         ok = cam.init()
         cam.set_datetime()
-        # Readiness check is NON-destructive: armed (init ok) + a usable SD card,
-        # WITHOUT a real shutter start/stop. A test recording stresses the USB
-        # link and can intermittently knock a marginal (USB3-cabled) camera off
-        # the bus -- the actual recording will be the operator's first shutter.
-        ready = ok and cam.sd_present()
+        # Honest readiness test: a real (brief) shutter start/stop. This actually
+        # proves the camera can record -- a weaker SD-only check would call a
+        # camera ready when its first real recording would fail. (A marginal
+        # USB3-cabled camera may drop here, but it drops on a real recording too,
+        # so this correctly flags it as not reliably recordable -> use USB2.)
+        ready = ok and cam.shutter_works()
         if ready:
             self._ready.add(cam.label)
             self._faulted.pop(cam.label, None)
-            self.get_logger().info(f'[{cam.label}] armed & ready (SD ok).')
+            self.get_logger().info(f'[{cam.label}] armed & verified.')
         else:
             self._ready.discard(cam.label)
-            self.get_logger().warn(f'[{cam.label}] NOT ready (init={ok}, sd={cam.sd_present()}).')
+            self.get_logger().warn(f'[{cam.label}] NOT ready (init={ok}). SD formatted / cable ok?')
         return ready
 
     # =====================================================================
