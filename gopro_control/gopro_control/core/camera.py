@@ -205,6 +205,7 @@ class GoPro:
             "ip": self.ip,
             "reachable": st is not None,
             "recording": bool(st and st.get(ST_ENCODING) == 1),
+            "busy": bool(st and st.get(ST_BUSY) == 1),   # SD/file op in progress
             "sd_ok": self._sd_usable(st),
             "remaining_sec": (st.get(ST_REMAINING_SEC) if st else None),
             "can_power_cycle": self.can_power_cycle(),

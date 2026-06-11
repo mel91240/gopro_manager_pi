@@ -49,29 +49,29 @@ class GoProManagerNode(Node):
         self.declare_parameter('record_grace_period', 10.0)          # [s] after start: encoder init, watchdog waits
         self.declare_parameter('restart_cooldown', 8.0)              # [s] between recovery attempts of a camera
         self.declare_parameter('fault_after', 30.0)                  # [s] a cam lost this long -> mission compromised
+        self.declare_parameter('discovery_timeout', 20.0)            # [s] wait for all cams to enumerate at boot
 
-        labels = [str(x) for x in self.get_parameter('camera_labels').value]
+        self.labels = [str(x) for x in self.get_parameter('camera_labels').value]
+        self.expected = len(self.labels)
         self.strikes_max = int(self.get_parameter('strikes_before_restart').value)
         self.grace_period = float(self.get_parameter('record_grace_period').value)
         self.restart_cooldown = float(self.get_parameter('restart_cooldown').value)
         self.fault_after = float(self.get_parameter('fault_after').value)
+        self.discovery_timeout = float(self.get_parameter('discovery_timeout').value)
 
         # --- State -------------------------------------------------------
-        self.cameras = discover(labels=labels)
+        self.cameras = []
         self.recording = False
         self.state = GoProSystem.STATE_INITIALIZING
         self.message = 'starting up'
-        self._strikes = {c.label: 0 for c in self.cameras}
-        self._grace_until = {c.label: 0.0 for c in self.cameras}
-        self._cooldown_until = {c.label: 0.0 for c in self.cameras}
+        self._strikes = {}
+        self._grace_until = {}
+        self._cooldown_until = {}
         self._recovering = {}       # label -> monotonic time it dropped (soft, being retried)
         self._faulted = {}          # label -> reason (hard fault: reachable but SD unusable)
         self._ready = set()         # labels armed and verified
-
-        if not self.cameras:
-            self.get_logger().warn('No GoPro found on any USB-ethernet interface.')
-        for cam in self.cameras:
-            self.get_logger().info(f'Found {cam!r}')
+        self._started = False       # discovery+arm done
+        self._first_seen = None     # monotonic time the first camera enumerated
 
         # --- Interfaces --------------------------------------------------
         self.create_service(SetBool, '~/record', self._on_record)
@@ -80,25 +80,58 @@ class GoProManagerNode(Node):
         self.system_pub = self.create_publisher(GoProSystem, '~/system', 10)
 
         self.create_timer(float(self.get_parameter('tick_period').value), self._tick)
-        self._armed_once = False
-        self.create_timer(1.0, self._arm_once)
+        self.create_timer(2.0, self._startup)
 
     # =====================================================================
-    # Startup: arm + time + verify
+    # Startup: discover (retry) -> arm + time + verify
     # =====================================================================
-    def _arm_once(self):
-        if self._armed_once:
+    def _startup(self):
+        """Discover the cameras and arm them. Retries discovery: right after a
+        Pi reboot the USB-ethernet interfaces may not be up yet when this node
+        starts, so a single scan would find nothing. We keep scanning, wait a
+        short window for every expected camera to enumerate, then arm whatever is
+        present (so one missing camera doesn't block the others forever)."""
+        if self._started:
             return
-        self._armed_once = True
+        cams = discover(labels=self.labels)
+        if len(cams) != len(self.cameras):
+            self._set_cameras(cams)
+            if cams:
+                for cam in cams:
+                    self.get_logger().info(f'Found {cam!r}')
+                self.get_logger().info(f'Discovered {len(cams)}/{self.expected} camera(s).')
+        if not self.cameras:
+            return                                  # USB not up yet -- keep scanning
+        if self._first_seen is None:
+            self._first_seen = time.monotonic()
+        have_all = len(self.cameras) >= self.expected
+        waited = time.monotonic() - self._first_seen
+        if not have_all and waited < self.discovery_timeout:
+            return                                  # give the other camera(s) time to appear
+        self._started = True
+        self._arm_all()
+
+    def _set_cameras(self, cams):
+        """Adopt a (re)discovered camera list, keeping per-camera bookkeeping."""
+        self.cameras = cams
+        for c in cams:
+            self._strikes.setdefault(c.label, 0)
+            self._grace_until.setdefault(c.label, 0.0)
+            self._cooldown_until.setdefault(c.label, 0.0)
+
+    def _arm_all(self):
+        if len(self.cameras) < self.expected:
+            self.get_logger().warn(
+                f'Only {len(self.cameras)}/{self.expected} camera(s) found -- arming those.')
         self.get_logger().info('Arming cameras...')
         if not system_clock_synced():
             self.get_logger().warn('Pi clock not NTP-synced yet; camera time will be set at record time.')
         for cam in self.cameras:
             self._arm(cam)
         if self.recording:
-            # We adopted an in-progress recording (manager restarted / operator
-            # reconnected mid-mission). Give the watchdog a grace period so it
-            # does not mistake the adoption moment for a dropout.
+            # We adopted an in-progress recording (manager restarted / Pi rebooted
+            # while filming). Give the watchdog a grace period so it does not
+            # mistake the adoption moment for a dropout.
             grace = time.monotonic() + self.grace_period
             for c in self.cameras:
                 self._grace_until[c.label] = grace
@@ -223,6 +256,16 @@ class GoProManagerNode(Node):
                     continue
                 if h['recording']:
                     self._mark_healthy(cam)
+                    continue
+                if h['reachable'] and h['busy']:
+                    # Reachable but busy = the camera is working (e.g. rebuilding
+                    # its last file after a power blip -- "SD recovery", which can
+                    # take a while on a long clip). Let it finish: hold it in the
+                    # recovering state but reset the clock so we do NOT raise a
+                    # false emergency while it is making progress.
+                    if cam.label not in self._recovering:
+                        self.get_logger().warn(f'[{cam.label}] busy (recovering file?) -- waiting.')
+                    self._recovering[cam.label] = now
                     continue
                 # Camera dropped out of recording. Flag it right away (so the
                 # operator is warned live) and keep trying to recover it.
