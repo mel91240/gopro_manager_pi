@@ -15,6 +15,7 @@ if ! docker ps --format '{{.Names}}' | grep -qx gopro_manager; then
 fi
 
 docker run --rm -it --network host --ipc host \
+    -e ROS_DOMAIN_ID=0 -e ROS_LOCALHOST_ONLY=1 \
     -v "$WS":/home/cosma_auv/swarm-vehicle \
     --entrypoint bash "$IMAGE" -lc '
         source /opt/ros/humble/setup.bash &&

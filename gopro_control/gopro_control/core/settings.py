@@ -52,6 +52,18 @@ def validate(camera_mode="", resolution="", fps="", fov="",
     return None
 
 
+def _retry(fn, *args, attempts: int = 3, delay: float = 0.6) -> bool:
+    """Apply one setting, retrying on transient rejection. Just after a record
+    stop (encoder still flushing) or right after arming, the Hero 12 briefly
+    answers 403/500 to the first one or two changes -- a short retry absorbs it."""
+    for i in range(attempts):
+        if fn(*args):
+            return True
+        if i < attempts - 1:
+            time.sleep(delay)
+    return False
+
+
 def apply_settings(cam: GoPro, camera_mode="", resolution="", fps="", fov="",
                    hypersmooth="", wind_reduction="") -> tuple[bool, str]:
     """Validate then apply the non-empty settings to one camera, in the order
@@ -64,12 +76,12 @@ def apply_settings(cam: GoPro, camera_mode="", resolution="", fps="", fov="",
     failed: list[str] = []
 
     if camera_mode:
-        if not cam.set_preset_group(MODE_PRESET_GROUP[camera_mode]):
+        if not _retry(cam.set_preset_group, MODE_PRESET_GROUP[camera_mode]):
             failed.append("mode")
         time.sleep(0.5)
 
     if resolution:
-        if not cam.set_setting(SID_RESOLUTION, RESOLUTION[resolution]):
+        if not _retry(cam.set_setting, SID_RESOLUTION, RESOLUTION[resolution]):
             failed.append("resolution")
         time.sleep(1.0)   # camera reconfigures its pipeline; later settings need this
 
@@ -86,7 +98,7 @@ def apply_settings(cam: GoPro, camera_mode="", resolution="", fps="", fov="",
     for name, sid, table, val in plan:
         if not val:
             continue
-        if not cam.set_setting(sid, table[val]):
+        if not _retry(cam.set_setting, sid, table[val]):
             failed.append(name)
         time.sleep(0.4)     # GoPro needs to settle between interdependent settings;
         #                     applying them back-to-back causes spurious 403/500.

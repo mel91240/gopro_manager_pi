@@ -42,8 +42,8 @@ class PiMenu(Node):
     def call(self, client, req, timeout=20.0):
         """Call a service and wait for the result (the executor spins in a
         background thread, so we just poll the future here)."""
-        if not client.wait_for_service(timeout_sec=3.0):
-            return None
+        if not client.wait_for_service(timeout_sec=10.0):   # cross-container DDS
+            return None                                     # discovery can be slow
         fut = client.call_async(req)
         deadline = time.time() + timeout
         while not fut.done() and time.time() < deadline:
@@ -108,11 +108,16 @@ def main(args=None):
     spin_thread = threading.Thread(target=executor.spin, daemon=True)
     spin_thread.start()
 
-    # Wait briefly for the manager's first state so a reconnecting operator sees
-    # the real status (e.g. RECORDING) instead of "connecting..." on the first screen.
-    deadline = time.time() + 3.0
+    # Wait for the manager's first state so a reconnecting operator sees the real
+    # status (e.g. RECORDING) instead of "connecting...". The menu is a fresh
+    # container each time, so DDS discovery with the persistent manager can take
+    # several seconds -- be patient rather than show a misleading screen.
+    print('Discovering gopro_manager...', end='', flush=True)
+    deadline = time.time() + 15.0
     while node.system is None and time.time() < deadline:
-        time.sleep(0.1)
+        print('.', end='', flush=True)
+        time.sleep(0.5)
+    print(' connected.' if node.system is not None else ' not found (is the manager up?).')
 
     try:
         while True:
