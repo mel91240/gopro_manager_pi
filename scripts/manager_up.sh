@@ -12,6 +12,7 @@
 #   ./manager_down.sh   stop it (ONLY after the footage is safe)
 set -e
 
+DIR="$(cd "$(dirname "$0")" && pwd)"
 IMAGE=cosma_auv:latest
 WS="$HOME/dev/swarm-vehicle"
 NAME=gopro_manager
@@ -33,5 +34,15 @@ docker run -d --name "$NAME" --restart unless-stopped \
         exec ros2 run gopro_control gopro_manager'
 
 echo ">>> Manager up (survives SSH disconnect)."
+
+# Host-side auto-revive watcher (Vbus must run on the host, not in the container).
+# Safe: it only power-cycles a camera CONFIRMED off the bus, never a visible one.
+if pgrep -f 'revive.sh --watch' >/dev/null 2>&1; then
+    echo ">>> auto-revive watcher already running"
+else
+    setsid bash "$DIR/revive.sh" --watch >/tmp/gopro_autorevive.log 2>&1 </dev/null &
+    echo ">>> auto-revive watcher started (host, log: /tmp/gopro_autorevive.log)"
+fi
+
 echo ">>> Watch it arm the cameras:   ./manager_log.sh"
 echo ">>> When all cameras are READY:  ./menu.sh"

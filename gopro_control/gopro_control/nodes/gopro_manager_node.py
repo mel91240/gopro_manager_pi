@@ -87,6 +87,7 @@ class GoProManagerNode(Node):
 
         self.create_timer(float(self.get_parameter('tick_period').value), self._tick)
         self.create_timer(2.0, self._startup)
+        self.create_timer(5.0, self._rescan)
 
     # =====================================================================
     # Startup: discover (retry) -> arm + time + verify
@@ -124,6 +125,39 @@ class GoProManagerNode(Node):
             self._strikes.setdefault(c.label, 0)
             self._grace_until.setdefault(c.label, 0.0)
             self._cooldown_until.setdefault(c.label, 0.0)
+
+    def _rescan(self):
+        """After startup, keep watching the bus (software only -- no Vbus):
+          - pick up a camera that (re)appears, e.g. after the host auto-revive
+            power-cycles a camera that was off the bus;
+          - when idle, re-arm any reachable camera that is not yet ready, so the
+            system returns to READY on its own once a camera is back.
+        During a recording the watchdog already re-arms/restarts dropped cameras."""
+        if not self._started:
+            return
+        known_ips = {c.ip for c in self.cameras}
+        for cam in discover(labels=self.labels):
+            if cam.ip not in known_ips:
+                self.cameras.append(cam)
+                self._strikes.setdefault(cam.label, 0)
+                self._grace_until.setdefault(cam.label, 0.0)
+                self._cooldown_until.setdefault(cam.label, 0.0)
+                self.get_logger().info(f'Camera appeared on the bus: {cam!r}')
+        if not self.recording:
+            now = time.monotonic()
+            for cam in self.cameras:
+                up = cam.reachable(timeout=1)
+                if cam.label in self._ready:
+                    if not up:                      # a ready camera fell off the bus
+                        self._ready.discard(cam.label)
+                        self.get_logger().warn(f'[{cam.label}] dropped off the bus -- will re-arm when back.')
+                        self._publish(self._snapshot())
+                    continue
+                if not up or now < self._cooldown_until.get(cam.label, 0.0):
+                    continue                        # still off the bus -- wait for the revive
+                self._cooldown_until[cam.label] = now + self.restart_cooldown
+                if self._arm(cam):                  # came back -> re-arm to READY
+                    self._publish(self._snapshot())
 
     def _arm_all(self):
         if len(self.cameras) < self.expected:

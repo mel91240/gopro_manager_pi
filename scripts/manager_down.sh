@@ -8,3 +8,8 @@ set -e
 echo ">>> Stopping GoPro manager..."
 docker rm -f gopro_manager >/dev/null 2>&1 && echo ">>> Manager stopped." \
     || echo ">>> Manager was not running."
+
+# stop the host-side auto-revive watcher too
+if pkill -f 'revive.sh --watch' 2>/dev/null; then
+    echo ">>> auto-revive watcher stopped"
+fi
