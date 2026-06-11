@@ -35,13 +35,12 @@ docker run -d --name "$NAME" --restart unless-stopped \
 
 echo ">>> Manager up (survives SSH disconnect)."
 
-# Host-side auto-revive watcher (Vbus must run on the host, not in the container).
-# Safe: it only power-cycles a camera CONFIRMED off the bus, never a visible one.
-if pgrep -f 'revive.sh --watch' >/dev/null 2>&1; then
-    echo ">>> auto-revive watcher already running"
+# The auto-revive watcher runs as a systemd service (starts on boot). Install it
+# once with ./install_service.sh. We just report its state here.
+if systemctl is-active --quiet gopro-autorevive.service 2>/dev/null; then
+    echo ">>> auto-revive watcher: active (systemd)"
 else
-    setsid bash "$DIR/revive.sh" --watch >/tmp/gopro_autorevive.log 2>&1 </dev/null &
-    echo ">>> auto-revive watcher started (host, log: /tmp/gopro_autorevive.log)"
+    echo ">>> auto-revive watcher: NOT running -- install it once: ./install_service.sh"
 fi
 
 echo ">>> Watch it arm the cameras:   ./manager_log.sh"

@@ -9,7 +9,6 @@ echo ">>> Stopping GoPro manager..."
 docker rm -f gopro_manager >/dev/null 2>&1 && echo ">>> Manager stopped." \
     || echo ">>> Manager was not running."
 
-# stop the host-side auto-revive watcher too
-if pkill -f 'revive.sh --watch' 2>/dev/null; then
-    echo ">>> auto-revive watcher stopped"
-fi
+# The auto-revive watcher is a systemd service and is left running on purpose
+# (it only ever acts on a camera confirmed off the bus). To stop it:
+#   sudo systemctl stop gopro-autorevive.service

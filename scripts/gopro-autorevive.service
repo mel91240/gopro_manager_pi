@@ -1,0 +1,15 @@
+[Unit]
+Description=GoPro auto-revive watcher (power-cycle a camera that fell off the USB bus)
+After=docker.service
+Wants=docker.service
+
+[Service]
+Type=simple
+User=pi
+# absolute path -- adjust if the repo lives elsewhere on the Pi
+ExecStart=/home/pi/dev/swarm-vehicle/gopro_scripts/revive.sh --watch
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
