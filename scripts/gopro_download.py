@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
 """Offload recorded videos from the GoPros to the Pi (or any destination).
 
-Cameras are downloaded IN PARALLEL (one stream per camera = one per USB bus),
-so two cameras transfer at once instead of one-after-the-other. Within a single
-camera, files are pulled sequentially (one read stream per SD card).
+Cameras are downloaded ONE AT A TIME by default. Benchmarking this rig
+(gopro_bench.py) showed a single camera reaches ~37 MB/s, but running both at
+once collapses the USB2 camera to ~1.4 MB/s (a shared upstream bottleneck --
+the powered hub's uplink / the Pi's USB host), so sequential is ~5x faster here.
+Use --parallel only if your hardware actually benefits.
 
 Each clip is saved as  <dest>/<CAMERA>/<UTC-timestamp>_<name>.MP4 . The camera
 clock is synced (tzone=0) so the timestamp is real UTC -- segments of one
 mission line up across both cameras and across a reboot. Re-runnable: a file
 already present at the right size is skipped, so an interrupted run just resumes.
 
-  ./download.sh                  all cameras -> ~/gopro_footage  (parallel)
+  ./download.sh                  all cameras -> ~/gopro_footage  (sequential)
+  ./download.sh --parallel       download cameras at once (slower on this rig)
   ./download.sh --pick           list the clips and ask which to copy
   ./download.sh --minsec 10      skip clips shorter than 10 s (queries duration)
   ./download.sh --all            include tiny (<2 MB) test clips too
@@ -116,9 +119,14 @@ def _download_one(ip, label, f, dest, lock, c):
             print(f"  [{label}] FAIL  {name}: {e}")
 
 
-def download_all(jobs, dest, lock=None, counters=None):
-    """jobs = [(label, ip, [file,...]), ...]. Cameras run in parallel (one worker
-    each); files within a camera are sequential. Returns the counters dict."""
+def download_all(jobs, dest, lock=None, counters=None, parallel=False):
+    """jobs = [(label, ip, [file,...]), ...]. Returns the counters dict.
+
+    Default is SEQUENTIAL (one camera at a time): on this rig the benchmark
+    showed that downloading both cameras at once collapses the USB2 camera to
+    ~1.4 MB/s (shared upstream bottleneck), whereas one-at-a-time each gets the
+    full ~37 MB/s. parallel=True keeps the old all-at-once behaviour for
+    hardware that actually benefits."""
     lock = lock or threading.Lock()
     c = counters if counters is not None else {"n": 0, "bytes": 0, "fail": 0}
 
@@ -126,9 +134,12 @@ def download_all(jobs, dest, lock=None, counters=None):
         for f in files:
             _download_one(ip, label, f, dest, lock, c)
 
-    with ThreadPoolExecutor(max_workers=max(1, len(jobs))) as ex:
+    if parallel:
+        with ThreadPoolExecutor(max_workers=max(1, len(jobs))) as ex:
+            list(ex.map(lambda j: camera_worker(*j), jobs))
+    else:
         for label, ip, files in jobs:
-            ex.submit(camera_worker, label, ip, files)
+            camera_worker(label, ip, files)
     return c
 
 
@@ -201,6 +212,8 @@ def pick(jobs):
 def main():
     ap = argparse.ArgumentParser(description="Offload GoPro videos to the Pi (parallel).")
     ap.add_argument("--pick", action="store_true", help="list clips and choose which to copy")
+    ap.add_argument("--parallel", action="store_true",
+                    help="download cameras at once (slower on this rig -- see gopro_bench.py)")
     ap.add_argument("--all", action="store_true", help="include tiny (<2 MB) test clips")
     ap.add_argument("--minsec", type=int, default=0, help="skip clips shorter than N seconds")
     ap.add_argument("--minsize", type=int, default=None, help="skip clips smaller than N bytes")
@@ -229,8 +242,9 @@ def main():
             return 0
 
     total = sum(len(f) for _, _, f in jobs)
-    print(f">>> downloading {total} clip(s) from {len(jobs)} camera(s) in parallel -> {args.dest}")
-    c = download_all(jobs, args.dest)
+    mode = "in parallel" if args.parallel else "sequentially"
+    print(f">>> downloading {total} clip(s) from {len(jobs)} camera(s) {mode} -> {args.dest}")
+    c = download_all(jobs, args.dest, parallel=args.parallel)
     print(f">>> done: {c['n']} file(s), {c['bytes'] // 1_000_000} MB -> {args.dest}   (failures: {c['fail']})")
     return 1 if c["fail"] else 0
 
