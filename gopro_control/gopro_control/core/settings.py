@@ -85,16 +85,13 @@ def apply_settings(cam: GoPro, camera_mode="", resolution="", fps="", fov="",
             failed.append("resolution")
         time.sleep(1.0)   # camera reconfigures its pipeline; later settings need this
 
-    # fps / hypersmooth / wind do not exist in Photo mode.
+    # fps / hypersmooth / wind do not exist in Photo mode, so drop them there.
     plan = [("fov", SID_FOV, FOV, fov)] if photo else [
         ("fps", SID_FPS, FPS, fps),
         ("fov", SID_FOV, FOV, fov),
         ("hypersmooth", SID_HYPERSMOOTH, HYPERSMOOTH, hypersmooth),
         ("wind_reduction", SID_WIND, WIND, wind_reduction),
     ]
-    if photo and any([fps, hypersmooth, wind_reduction]):
-        # Caller asked for video-only settings in Photo mode; just note it.
-        pass
     for name, sid, table, val in plan:
         if not val:
             continue

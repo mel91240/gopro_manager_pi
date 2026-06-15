@@ -152,16 +152,15 @@ def _url(ip, f):
     return f"http://{ip}:{PORT}/videos/DCIM/{f['dir']}/{f['name']}"
 
 
-def _pull_range(ip, f, start, end, part, target, progress=None):
-    """Append the byte range [start+have, end] of file f into `part`, resuming
-    if `part` already holds some of it. Returns when `part` reaches `target`
-    bytes; raises on any network/stall error (caught by the retry loop).
-    Each chunk read is reported to `progress` (live %/speed/ETA)."""
+def _pull_range(ip, f, end, part, target, progress=None):
+    """Download file f into `part`, resuming from whatever it already holds via
+    an HTTP Range request. Returns once `part` reaches `target` bytes; raises on
+    any network/stall error (caught by the retry loop). Each read is reported to
+    `progress` for the live status line."""
     have = os.path.getsize(part) if os.path.exists(part) else 0
     if have >= target:
         return
-    headers = {"Range": f"bytes={start + have}-{end}"} if (start + have or end) else {}
-    req = Request(_url(ip, f), headers=headers)
+    req = Request(_url(ip, f), headers={"Range": f"bytes={have}-{end}"})
     r = urlopen(req, timeout=READ_TIMEOUT)
     try:
         code = r.getcode()
@@ -277,7 +276,7 @@ def _download_one(ip, label, f, dest, lock, c, progress=None):
         # one resumable connection per file (robust; resumes a flaky cam). On this
         # rig -- two USB2-class cameras already pulled in parallel -- splitting a
         # file into more connections only adds bus contention (measured slower).
-        _retrying(ip, lambda: _pull_range(ip, f, 0, size - 1, tmp, size, progress))
+        _retrying(ip, lambda: _pull_range(ip, f, size - 1, tmp, size, progress))
 
         if os.path.getsize(tmp) == size:
             os.replace(tmp, out)
@@ -430,10 +429,6 @@ def main():
         parallel = False
     else:
         parallel = auto_parallel(cams)
-
-    if (subprocess.run(["docker", "ps", "--format", "{{.Names}}"],
-                       capture_output=True, text=True).stdout.split().count("gopro_manager")):
-        print("(note: manager is running -- ./manager_down.sh first if a download stalls)")
 
     links = ", ".join(f"{l}({ip},{usb_speed(ifc) or '?'}M)" for l, ip, ifc in cams)
     print(f">>> {len(cams)} camera(s): {links}")

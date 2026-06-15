@@ -188,9 +188,8 @@ def main():
 
     ok, fail = run_deletion(targets, args.yes, what)
 
-    # verify
     if ok:
-        remaining = sum(len(gd.media_list(ip)) for _, ip, _ in cams if True)
+        remaining = sum(len(gd.media_list(ip)) for _, ip, _ in cams)
         print(f">>> remaining on card(s): {remaining} clip(s).")
     return 1 if fail else 0
 

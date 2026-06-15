@@ -1,16 +1,16 @@
 #!/bin/bash
-# Open the operator menu (transient client).
-#
-# Safe to quit and re-open as many times as you like: it does NOT stop the
-# manager or the recording. On reconnect after a mission it shows the live state
-# (e.g. RECORDING 2/2) so you can stop the take and recover the footage.
+# Open the recording menu (record / stop / settings) -- a transient ROS client.
+# Reached from gopro.sh [1]. Safe to quit and re-open: it touches neither the
+# manager nor an in-progress recording, and on reconnect shows the live state
+# (e.g. RECORDING 2/2) so a take can be stopped and the footage recovered.
 set -e
 
 IMAGE=cosma_auv:latest
 WS="$HOME/dev/swarm-vehicle"
 
 if ! docker ps --format '{{.Names}}' | grep -qx gopro_manager; then
-    echo "!!! Manager is not running. Start it first:  ./manager_up.sh"
+    echo "!!! Manager is not running (it normally auto-starts at boot)."
+    echo "    Start it from gopro.sh [4], or ./manager_up.sh."
     exit 1
 fi
 

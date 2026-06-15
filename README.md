@@ -18,9 +18,10 @@ Three pieces, by design separate:
 
 | Piece | Where | Role | Lifetime |
 |---|---|---|---|
-| **`gopro_manager`** | Docker container (`cosma_auv`) | owns the cameras: arm, record, watchdog, auto-resume | persistent (Docker `--restart`, survives SSH/reboot) |
-| **`pi_menu`** | transient container | operator console (start/stop/settings) | open & close at will |
+| **`gopro_manager`** | Docker container (`cosma_auv`) | owns the cameras: arm, record, watchdog, auto-resume | persistent — systemd boot service (`gopro-manager.service`) + Docker `--restart`, survives SSH/reboot |
+| **`pi_menu`** | transient container | recording console (start/stop/settings), reached from `gopro.sh [1]` | open & close at will |
 | **auto-revive watcher** | host (systemd) | power-cycle a camera that fell **off the bus** (Vbus stays on the host) | persistent (starts on boot) |
+| **`gopro.sh`** + offload tools | host | unified operator menu: record / offload to SSD / wipe cards / manager | run on demand |
 
 The manager has **no USB-power privileges** (it can't corrupt anything); the
 only component that touches Vbus is the host watcher, and only on a camera
@@ -29,20 +30,24 @@ confirmed off the bus.
 ```
 gopro_control/gopro_control/
   core/            # ROS-independent engine (urllib only, no extra deps)
-    camera.py      # GoPro class, discovery, state, (uhubctl power-cycle helpers)
+    camera.py      # GoPro class: discovery, state, control
     settings.py    # Open GoPro setting maps + validation + ordered apply
     cli.py         # dev CLI for live testing without ROS
   nodes/
     gopro_manager_node.py   # the manager node
-    pi_menu_node.py         # the operator console
+    pi_menu_node.py         # the recording console
 scripts/           # host-side operation (run on the Pi)
-  manager_up.sh / manager_down.sh / manager_log.sh
-  menu.sh
+  gopro.sh                  # unified operator menu (entry point): record / offload / wipe / manager
+  manager_up.sh / manager_down.sh / manager_log.sh / menu.sh
   revive.sh                 # one-shot or --watch auto-revive
-  gopro-autorevive.service  # systemd unit for the watcher
-  install_service.sh        # installs+enables the service (run once)
+  gopro_download.py         # offload footage -> SSD (robust, resumable, live progress)
+  gopro_delete.py           # delete / wipe media on the cameras
+  mp4meta.py                # MP4 start time + GPMF/IMU stream detection (no ffmpeg)
+  gopro_bench.py            # transfer-speed diagnostic
+  gopro-manager.service / gopro-autorevive.service   # systemd boot units
+  install_service.sh        # installs+enables both boot services (run once)
 gopro_msgs/        # GoProStatus.msg, GoProSystem.msg, GoProSettings.srv
-tests/             # automated test suite + bench mission script
+tests/             # automated ROS-interface test suite
 ```
 
 ---
@@ -89,33 +94,35 @@ tests/             # automated test suite + bench mission script
 
 ---
 
-## Operating (mission flow)
+## Operating
 
-On the Pi (`~/dev/swarm-vehicle/gopro_scripts/`):
+One-time setup installs the boot services, so the manager + watcher start
+automatically on power-up and the cameras arm themselves — no manual step:
 
 ```bash
-# one-time setup: install the auto-revive watcher as a boot service
-./install_service.sh
-
-# --- start of mission ---
-./manager_up.sh        # persistent manager (arms the cameras); reports the watcher
-./manager_log.sh       # watch until both cameras are "armed & verified"
-./menu.sh              # [1] start recording, then quit ([0]) -- recording continues
-
-# ...put the AUV in the water, close SSH. Manager + watcher keep running...
-
-# --- after the mission (reconnect SSH) ---
-./menu.sh              # shows RECORDING (or it auto-resumed after a reboot); [2] stop
-./manager_down.sh      # optional: stop the manager once the footage is safe
+./install_service.sh     # installs+enables gopro-manager + gopro-autorevive
 ```
 
-Recovery helper:
+`./gopro.sh` is then the single operator entry point (run on the Pi):
+
+```
+=== AUV GoPro ===  (manager: UP | SSD: mounted)
+  [1] Recording (record / stop / settings)    -> the ROS console
+  [2] Copy footage -> SSD                      -> live %/speed/ETA
+  [3] Delete / wipe the cards
+  [4] Start / stop the manager
+```
+
+Typical mission: power on (cameras auto-arm) → `gopro.sh [1]` to start the take,
+put the AUV in the water, close SSH (the manager keeps running and auto-resumes
+a new segment if a reboot interrupts the take) → after the dive, reconnect,
+`gopro.sh [1]` [2] to stop, then [2] to offload to the SSD and [3] to wipe the
+cards once the footage is safe.
+
+Recovery helper (also runs automatically as the watcher service):
 ```bash
 ./revive.sh            # one-shot: power-cycle a camera confirmed off the bus
 ```
-
-Use `./menu.sh` for start/stop — it's a reliable persistent client. (One-off
-`ros2 service call` in a throwaway container is slow to discover the manager.)
 
 ---
 

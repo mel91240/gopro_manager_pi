@@ -7,8 +7,8 @@
 #   manager.log   gopro_manager      -- DEGRADED / FAULT / recovery (if running)
 #   camstate.log  both cameras every 10 s (enc=1 means actively recording)
 #
-# Run this AFTER ./manager_up.sh (so the manager log is captured), then start
-# recording from ./menu.sh. Stop everything later with log_stop.sh.
+# Start this with the manager up (so its log is captured), then start recording
+# from gopro.sh [1]. Stop everything later with log_stop.sh.
 HERE="$(cd "$(dirname "$0")" && pwd)"
 TS=$(date +%Y%m%d_%H%M%S)
 DIR="$HOME/rectest/logs_$TS"
@@ -30,7 +30,7 @@ if docker ps --format '{{.Names}}' | grep -qx gopro_manager; then
   setsid docker logs -f gopro_manager </dev/null >"$DIR/manager.log" 2>&1 &
   echo $! >> "$DIR/pids"
 else
-  echo "(manager not running -- start it with ./manager_up.sh; no manager.log)"
+  echo "(manager not running -- no manager.log; start it from gopro.sh [4])"
 fi
 
 # 4) camera state every 10 s
@@ -40,5 +40,5 @@ echo $! >> "$DIR/pids"
 sleep 1
 echo ">>> logging started -> $DIR"
 echo ">>> $(wc -l < "$DIR/pids") collectors running (survive SSH drop)"
-echo ">>> now start recording:  ./menu.sh  -> press [1] -> confirm both RECORDING -> exit menu"
+echo ">>> now start recording:  gopro.sh [1] -> [1] -> confirm both RECORDING -> exit"
 echo ">>> stop the test later with:  ~/rectest/log_stop.sh"

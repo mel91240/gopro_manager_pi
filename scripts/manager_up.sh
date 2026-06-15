@@ -1,15 +1,8 @@
 #!/bin/bash
-# Start the GoPro manager as a PERSISTENT background service on the AUV Pi.
-#
-# The manager must keep running for the WHOLE mission -- while the AUV is in the
-# water and even after the operator closes the menu or drops the SSH session. So
-# it runs as a DETACHED, named Docker container, NOT tied to this shell.
-# Run this ONCE at the start of a mission.
-#
-#   ./manager_up.sh     start it (arms the cameras)            <- run once
-#   ./menu.sh           open the operator menu (start/stop)    <- as many times as you like
-#   ./manager_log.sh    watch what the manager is doing
-#   ./manager_down.sh   stop it (ONLY after the footage is safe)
+# Start the GoPro manager (arms the cameras) as a detached, named Docker
+# container that survives SSH disconnects. Normally started automatically at boot
+# by gopro-manager.service (install with ./install_service.sh); run by hand only
+# as a fallback, or on a host where the service isn't installed.
 set -e
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -18,7 +11,7 @@ WS="$HOME/dev/swarm-vehicle"
 NAME=gopro_manager
 
 if docker ps --format '{{.Names}}' | grep -qx "$NAME"; then
-    echo ">>> Manager already running (container '$NAME'). Open the menu with ./menu.sh"
+    echo ">>> Manager already running (container '$NAME')."
     exit 0
 fi
 docker rm -f "$NAME" >/dev/null 2>&1 || true
@@ -43,5 +36,4 @@ else
     echo ">>> auto-revive watcher: NOT running -- install it once: ./install_service.sh"
 fi
 
-echo ">>> Watch it arm the cameras:   ./manager_log.sh"
-echo ">>> When all cameras are READY:  ./menu.sh"
+echo ">>> Logs: ./manager_log.sh   |   operator menu: ./gopro.sh"

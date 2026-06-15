@@ -1,39 +1,47 @@
 # Operating the GoPro rig on the AUV
 
-The **manager** and the **menu** are deliberately two separate processes:
+`./gopro.sh` is the single operator entry point. The manager and the auto-revive
+watcher run as systemd boot services, so the cameras arm themselves on power-up —
+you normally never start anything by hand.
 
-- The **manager** owns the cameras and must run for the **whole mission** -- while
-  the AUV is underwater and after you close the menu or drop SSH. It runs as a
-  detached Docker container, so it survives the SSH session ending.
-- The **menu** is just a thin client. Open it, send commands, close it. Re-open
-  it any time -- it never stops the manager or the recording.
-
-## Mission flow
+## Setup (once)
 
 ```bash
-# --- before the dive (SSH on the Pi) ---
-./manager_up.sh      # start the persistent manager; it arms the cameras
-./manager_log.sh     # watch until both cameras report "armed & verified"
-./menu.sh            # [1] start recording, then quit the menu ([0])
-
-# ...put the AUV in the water, then just close SSH. The manager keeps running. ...
-
-# --- after the dive (reconnect SSH) ---
-./menu.sh            # shows RECORDING (2/2); press [2] to stop. Footage is safe.
-./manager_down.sh    # optional: stop the manager once you are done
+./install_service.sh     # installs + enables gopro-manager + gopro-autorevive
 ```
 
-## Why this is safe
+## Operator menu
 
-- If the manager is **restarted** while the cameras are recording (Pi reboot,
-  crash, `--restart`), it **detects the in-progress recording and adopts it** --
-  it does NOT re-arm or shutter-test a recording camera, which would beep and
-  could stop the take.
-- Because the manager knows it is recording, pressing **[1] Start** again is
-  refused on the manager side, so it never sends a second shutter to a recording
-  camera -- **no loud beep**.
+```bash
+./gopro.sh
+```
+```
+=== AUV GoPro ===  (manager: UP | SSD: mounted)
+  [1] Recording (record / stop / settings)
+  [2] Copy footage -> SSD       (live %/speed/ETA, 'q' to cancel)
+  [3] Delete / wipe the cards
+  [4] Start / stop the manager
+```
 
-## Quick local test (couples manager + menu in one container)
+- **[1] Recording** opens the ROS console (`menu.sh`): [1] start, [2] stop,
+  [3] settings. Safe to quit and re-open — it never stops the manager or an
+  in-progress take, and on reconnect shows the live state (e.g. RECORDING 2/2).
+- **[2] Copy** mounts the SSD and offloads with a resumable downloader that
+  survives a camera hiccup. Works with the manager running.
+- **[3] Delete** removes media from the cards (selective or all; refuses a
+  recording camera). The Open GoPro API has no real format — "all" wipes media.
+- **[4] Manager** toggles the manager container (it auto-starts at boot anyway).
 
-`tests/mission.sh` is only for a quick bench test; it kills the manager when you
-quit. For real missions always use `manager_up.sh` + `menu.sh`.
+## Why the manager is decoupled
+
+The manager owns the cameras and must run for the whole mission — underwater and
+after SSH drops — so it runs as a detached, systemd-managed Docker container that
+survives the session ending. If it restarts while filming it **adopts** the
+in-progress recording (no re-arm, no beep), and the in-recording guard means
+pressing [1] again never double-shutters a recording camera.
+
+## Low-level scripts (normally not needed)
+
+`manager_up.sh` / `manager_down.sh` — manual manager control (also the service's
+Exec hooks); `manager_log.sh` — manager logs; `menu.sh` — the ROS console;
+`revive.sh` — power-cycle a camera confirmed off the bus.
