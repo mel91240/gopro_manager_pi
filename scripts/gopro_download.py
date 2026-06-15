@@ -17,11 +17,9 @@ cameras sit on USB3 the two downloads run at full speed at once (~77 MB/s
 aggregate). But with a mixed USB2+USB3 wiring the USB2 camera collapses to
 ~1.4 MB/s under contention. So the default is AUTO: parallel only when every
 camera reports a USB3 (5000 Mbps) link, otherwise sequential. Override with
---parallel / --sequential.
-
-CHUNKED (--chunks N): split one file into N parallel Range connections (~1.3x on
-this rig). Each chunk is independently retried/resumed. Default 1 (most robust);
-the gain only matters when the destination disk is faster than one camera.
+--parallel / --sequential. (One connection per file: on this rig two
+USB2-class cameras already pulled in parallel are at the ceiling -- splitting a
+file into more connections only adds bus contention, measured slower.)
 
 Each clip is saved as  <dest>/<CAMERA>/<UTC-timestamp>_<name>.MP4 . The camera
 clock is set by the operator to match the Pi/navigation clock, so the timestamp
@@ -31,7 +29,6 @@ the right size is skipped -> an interrupted run just resumes.
   ./download.sh                  all cameras -> ~/gopro_footage  (auto par/seq)
   ./download.sh --parallel       force both cameras at once
   ./download.sh --sequential     force one camera at a time
-  ./download.sh --chunks 4       split each file into 4 Range connections
   ./download.sh --pick           list the clips and ask which to copy
   ./download.sh --minsec 10      skip clips shorter than 10 s (queries duration)
   ./download.sh --all            include tiny (<2 MB) test clips too
@@ -55,7 +52,7 @@ LABELS = ["LEFT", "RIGHT", "CAM2", "CAM3"]
 DEFAULT_MINSIZE = 2_000_000          # bytes; skips 0 s test clips with no extra call
 
 READ_TIMEOUT = 20                    # s; a per-read stall longer than this -> retry
-RETRIES = 6                          # attempts per file (or per chunk) before giving up
+RETRIES = 6                          # attempts per file before giving up
 BACKOFF = 2                          # s; pause after a failure (the camera re-init settles)
 REINIT_MIN_GAP = 3                   # s; don't re-init the same camera more often than this
 
@@ -138,7 +135,7 @@ _reinit_lock = threading.Lock()
 
 def _reinit(ip):
     """Pull a camera back into Open GoPro wired-control mode (out of "USB
-    Connected"). Throttled so concurrent chunk threads don't storm it."""
+    Connected"). Throttled so concurrent camera threads don't storm it."""
     with _reinit_lock:
         last = _reinit_state.get(ip, 0)
         now = time.monotonic()
@@ -180,30 +177,6 @@ def _pull_range(ip, f, start, end, part, target, progress=None):
                 o.write(b)
                 if progress is not None:
                     progress.add(len(b))
-    finally:
-        r.close()
-
-
-def _pull_chunk(ip, f, fd, start, end, progress=None):
-    """Download byte range [start, end] of f and write it DIRECTLY at its absolute
-    offset into the shared file descriptor fd (os.pwrite -- thread-safe positioned
-    write, no shared file offset). Used by the chunked path so there is no temp
-    part + concatenation pass. Re-fetches the whole range on retry (not resumable
-    across runs); the single-connection path is the resumable/robust one."""
-    req = Request(_url(ip, f), headers={"Range": f"bytes={start}-{end}"})
-    r = urlopen(req, timeout=READ_TIMEOUT)
-    try:
-        if r.getcode() != 206:
-            raise IOError(f"range not honored (HTTP {r.getcode()})")
-        offset = start
-        while True:
-            b = r.read(1 << 20)
-            if not b:
-                break
-            os.pwrite(fd, b, offset)
-            offset += len(b)
-            if progress is not None:
-                progress.add(len(b))
     finally:
         r.close()
 
@@ -288,7 +261,7 @@ def _reporter(progress):
         time.sleep(0.3)
 
 
-def _download_one(ip, label, f, dest, lock, c, chunks, progress=None):
+def _download_one(ip, label, f, dest, lock, c, progress=None):
     name = f"{_ts(f['cre'])}_{f['name']}"
     outdir = os.path.join(dest, label)
     os.makedirs(outdir, exist_ok=True)
@@ -301,28 +274,10 @@ def _download_one(ip, label, f, dest, lock, c, chunks, progress=None):
         return
     tmp = out + ".part"
     try:
-        if chunks <= 1 or size < 8_000_000:
-            # single resumable connection (most robust; ideal for flaky cams)
-            _retrying(ip, lambda: _pull_range(ip, f, 0, size - 1, tmp, size, progress))
-        else:
-            # N parallel Range connections written DIRECTLY at their offset into one
-            # pre-allocated file (os.pwrite) -- no temp parts, no concatenation pass,
-            # so chunking is a real speedup. Range is known-supported here (HTTP 206).
-            step = size // chunks
-            bounds = [(i * step, (size - 1 if i == chunks - 1 else (i + 1) * step - 1))
-                      for i in range(chunks)]
-            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
-            try:
-                os.ftruncate(fd, size)
-
-                def grab(b):
-                    s, e = b
-                    _retrying(ip, lambda: _pull_chunk(ip, f, fd, s, e, progress))
-
-                with ThreadPoolExecutor(max_workers=chunks) as ex:
-                    list(ex.map(grab, bounds))
-            finally:
-                os.close(fd)
+        # one resumable connection per file (robust; resumes a flaky cam). On this
+        # rig -- two USB2-class cameras already pulled in parallel -- splitting a
+        # file into more connections only adds bus contention (measured slower).
+        _retrying(ip, lambda: _pull_range(ip, f, 0, size - 1, tmp, size, progress))
 
         if os.path.getsize(tmp) == size:
             os.replace(tmp, out)
@@ -341,11 +296,11 @@ def _download_one(ip, label, f, dest, lock, c, chunks, progress=None):
         _emit(f"  [{label}] FAIL  {name}: {e}  (.part kept for resume)")
 
 
-def download_all(jobs, dest, lock=None, counters=None, parallel=False, chunks=1):
+def download_all(jobs, dest, lock=None, counters=None, parallel=False):
     """jobs = [(label, ip, [file,...]), ...]. Returns the counters dict.
 
     parallel: download cameras at once (use only when all cameras are USB3 --
-    see auto_parallel()). chunks: split each file into N Range connections."""
+    see auto_parallel())."""
     lock = lock or threading.Lock()
     c = counters if counters is not None else {"n": 0, "bytes": 0, "fail": 0}
 
@@ -359,7 +314,7 @@ def download_all(jobs, dest, lock=None, counters=None, parallel=False, chunks=1)
 
     def camera_worker(label, ip, files):
         for f in files:
-            _download_one(ip, label, f, dest, lock, c, chunks, progress)
+            _download_one(ip, label, f, dest, lock, c, progress)
 
     try:
         if parallel and len(jobs) > 1:
@@ -456,7 +411,6 @@ def main():
     ap.add_argument("--pick", action="store_true", help="list clips and choose which to copy")
     ap.add_argument("--parallel", action="store_true", help="force both cameras at once")
     ap.add_argument("--sequential", action="store_true", help="force one camera at a time")
-    ap.add_argument("--chunks", type=int, default=1, help="split each file into N Range connections")
     ap.add_argument("--all", action="store_true", help="include tiny (<2 MB) test clips")
     ap.add_argument("--minsec", type=int, default=0, help="skip clips shorter than N seconds")
     ap.add_argument("--minsize", type=int, default=None, help="skip clips smaller than N bytes")
@@ -497,10 +451,9 @@ def main():
     mode = "parallel" if parallel else "sequential"
     if not (args.parallel or args.sequential):
         mode += " (auto)"
-    ch = f", {args.chunks}-way chunked" if args.chunks > 1 else ""
-    print(f">>> downloading {total} clip(s) from {len(jobs)} camera(s) [{mode}{ch}] -> {args.dest}")
+    print(f">>> downloading {total} clip(s) from {len(jobs)} camera(s) [{mode}] -> {args.dest}")
     t0 = time.time()
-    c = download_all(jobs, args.dest, parallel=parallel, chunks=max(1, args.chunks))
+    c = download_all(jobs, args.dest, parallel=parallel)
     dt = time.time() - t0
     rate = (c["bytes"] / dt / 1e6) if dt else 0
     print(f">>> done: {c['n']} file(s), {c['bytes'] // 1_000_000} MB in {_fmt_eta(dt)} "
