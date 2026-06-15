@@ -15,31 +15,38 @@ DIR="$(cd "$(dirname "$0")" && pwd)"
 SSD_DEV="${SSD_DEV:-/dev/sda1}"
 SSD_MNT="${SSD_MNT:-/mnt/ssd}"
 DEST="${GOPRO_DEST:-$SSD_MNT/gopro}"
-WATCHER=gopro-autorevive.service
 
 manager_running() { docker ps --format '{{.Names}}' 2>/dev/null | grep -qx gopro_manager; }
 ssd_mounted()     { mountpoint -q "$SSD_MNT" 2>/dev/null; }
 pause()           { read -rp "  (Entrée pour revenir au menu) " _; }
 
-mount_ssd() {
-    if ssd_mounted; then return 0; fi
-    echo ">>> montage du SSD ($SSD_DEV -> $SSD_MNT)..."
-    sudo mount "$SSD_DEV" "$SSD_MNT" || { echo "!!! échec du montage"; return 1; }
-    sudo mkdir -p "$DEST" && sudo chown "$(id -u):$(id -g)" "$DEST"
+ensure_dest() {
+    # Mount the SSD if needed, then make sure DEST exists AND is writable by us.
+    # Done every time (not only on first mount) -- /mnt/ssd is root-owned, so the
+    # destination folder must be created+chowned once or python (as pi) can't write.
+    if ! ssd_mounted; then
+        echo ">>> montage du SSD ($SSD_DEV -> $SSD_MNT)..."
+        sudo mount "$SSD_DEV" "$SSD_MNT" || { echo "!!! échec du montage du SSD"; return 1; }
+    fi
+    if [ ! -w "$DEST" ]; then
+        sudo mkdir -p "$DEST" && sudo chown "$(id -u):$(id -g)" "$DEST" \
+            || { echo "!!! impossible de préparer $DEST"; return 1; }
+    fi
 }
 
 do_download() {
-    mount_ssd || { pause; return; }
+    ensure_dest || { pause; return; }
     echo ">>> Destination : $DEST"
     read -rp "  Tout copier [a] ou choisir [p] ? (a/p, défaut a) : " m
-    echo ">>> (watcher en pause le temps du transfert)"
-    sudo systemctl stop "$WATCHER" 2>/dev/null
+    # The manager can stay up (the robust downloader tolerates its state polls)
+    # and the auto-revive watcher stays on (it only ever acts on a camera that has
+    # FALLEN OFF the bus -- which doesn't happen mid-copy, and if it did a
+    # power-cycle is exactly the recovery we want; the download just resumes).
     if [ "${m:-a}" = "p" ]; then
         GOPRO_DEST="$DEST" python3 "$DIR/gopro_download.py" --pick
     else
         GOPRO_DEST="$DEST" python3 "$DIR/gopro_download.py"
     fi
-    sudo systemctl start "$WATCHER" 2>/dev/null
     pause
 }
 
