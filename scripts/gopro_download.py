@@ -218,6 +218,18 @@ def _emit(msg):
         sys.stdout.flush()
 
 
+def _fmt_eta(sec):
+    """Human time-remaining: 4h05 / 12min30 / 45s (readable even for a 1 TB copy)."""
+    sec = int(sec)
+    h, rem = divmod(sec, 3600)
+    m, s = divmod(rem, 60)
+    if h:
+        return f"{h}h{m:02d}"
+    if m:
+        return f"{m}min{s:02d}"
+    return f"{s}s"
+
+
 class Progress:
     """Shared, thread-safe transfer progress for the live status line."""
 
@@ -246,11 +258,10 @@ class Progress:
         spd = done / el / 1e6 if el > 0 else 0.0
         pct = done / total * 100 if total else 100.0
         eta = (total - done) / (done / el) if (done > 0 and el > 0 and total > done) else 0
-        m, s = divmod(int(eta), 60)
         filled = int(pct / 5)
         bar = "#" * filled + "-" * (20 - filled)
         return (f">>> [{bar}] {pct:4.1f}%  {done/1e9:.2f}/{total/1e9:.2f} GB  "
-                f"{spd:5.1f} MB/s  ETA {m:d}:{s:02d}  files {fd}/{ft}")
+                f"{spd:5.1f} MB/s  restant {_fmt_eta(eta):>7}  files {fd}/{ft}")
 
 
 def _reporter(progress):
@@ -477,7 +488,7 @@ def main():
     c = download_all(jobs, args.dest, parallel=parallel, chunks=max(1, args.chunks))
     dt = time.time() - t0
     rate = (c["bytes"] / dt / 1e6) if dt else 0
-    print(f">>> done: {c['n']} file(s), {c['bytes'] // 1_000_000} MB in {dt:.0f}s "
+    print(f">>> done: {c['n']} file(s), {c['bytes'] // 1_000_000} MB in {_fmt_eta(dt)} "
           f"({rate:.1f} MB/s) -> {args.dest}   (failures: {c['fail']})")
     return 1 if c["fail"] else 0
 
