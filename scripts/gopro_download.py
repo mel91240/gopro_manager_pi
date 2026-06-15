@@ -156,10 +156,11 @@ def _url(ip, f):
     return f"http://{ip}:{PORT}/videos/DCIM/{f['dir']}/{f['name']}"
 
 
-def _pull_range(ip, f, start, end, part, target):
+def _pull_range(ip, f, start, end, part, target, progress=None):
     """Append the byte range [start+have, end] of file f into `part`, resuming
     if `part` already holds some of it. Returns when `part` reaches `target`
-    bytes; raises on any network/stall error (caught by the retry loop)."""
+    bytes; raises on any network/stall error (caught by the retry loop).
+    Each chunk read is reported to `progress` (live %/speed/ETA)."""
     have = os.path.getsize(part) if os.path.exists(part) else 0
     if have >= target:
         return
@@ -178,6 +179,8 @@ def _pull_range(ip, f, start, end, part, target):
                 if not b:
                     break
                 o.write(b)
+                if progress is not None:
+                    progress.add(len(b))
     finally:
         r.close()
 
@@ -203,21 +206,87 @@ def _silent_rm(p):
         pass
 
 
-def _download_one(ip, label, f, dest, lock, c, chunks):
+# --- live progress (one self-updating line: % / GB / MB/s / ETA / files) ------
+_TTY = sys.stdout.isatty()
+_print_lock = threading.Lock()
+
+
+def _emit(msg):
+    """Print a permanent line without clobbering the live progress line."""
+    with _print_lock:
+        sys.stdout.write(("\r\033[K" if _TTY else "") + msg + "\n")
+        sys.stdout.flush()
+
+
+class Progress:
+    """Shared, thread-safe transfer progress for the live status line."""
+
+    def __init__(self, total_bytes, total_files):
+        self.total = total_bytes
+        self.total_files = total_files
+        self.done = 0
+        self.files_done = 0
+        self.active = {}          # label -> current filename
+        self.lock = threading.Lock()
+        self.t0 = time.monotonic()
+        self.stop = False
+
+    def add(self, n):
+        with self.lock:
+            self.done += n
+
+    def file_done(self):
+        with self.lock:
+            self.files_done += 1
+
+    def set_active(self, label, name):
+        with self.lock:
+            self.active[label] = name
+
+    def render(self):
+        with self.lock:
+            done, total = self.done, self.total
+            fd, ft = self.files_done, self.total_files
+            act = ", ".join(n for n in self.active.values() if n)
+        el = time.monotonic() - self.t0
+        spd = done / el / 1e6 if el > 0 else 0.0
+        pct = done / total * 100 if total else 100.0
+        eta = (total - done) / (done / el) if (done > 0 and el > 0 and total > done) else 0
+        m, s = divmod(int(eta), 60)
+        filled = int(pct / 5)
+        bar = "#" * filled + "-" * (20 - filled)
+        line = (f">>> [{bar}] {pct:4.1f}%  {done/1e9:.2f}/{total/1e9:.2f} GB  "
+                f"{spd:5.1f} MB/s  ETA {m:d}:{s:02d}  files {fd}/{ft}")
+        return line + (f"  ({act})" if act else "")
+
+
+def _reporter(progress):
+    while not progress.stop:
+        with _print_lock:
+            sys.stdout.write("\r\033[K" + progress.render())
+            sys.stdout.flush()
+        time.sleep(0.3)
+
+
+def _download_one(ip, label, f, dest, lock, c, chunks, progress=None):
     name = f"{_ts(f['cre'])}_{f['name']}"
     outdir = os.path.join(dest, label)
     os.makedirs(outdir, exist_ok=True)
     out = os.path.join(outdir, name)
     size = f["size"]
     if os.path.exists(out) and os.path.getsize(out) == size:
-        with lock:
-            print(f"  [{label}] have  {name}")
+        if progress is not None:
+            progress.add(size)
+            progress.file_done()
+        _emit(f"  [{label}] have  {name}")
         return
+    if progress is not None:
+        progress.set_active(label, f["name"])
     tmp = out + ".part"
     try:
         if chunks <= 1 or size < 8_000_000:
             # single resumable connection (most robust; ideal for flaky cams)
-            _retrying(ip, lambda: _pull_range(ip, f, 0, size - 1, tmp, size))
+            _retrying(ip, lambda: _pull_range(ip, f, 0, size - 1, tmp, size, progress))
         else:
             # N parallel Range connections, each independently retried/resumed,
             # then concatenated. Range is known-supported on this rig (HTTP 206).
@@ -228,7 +297,7 @@ def _download_one(ip, label, f, dest, lock, c, chunks):
 
             def grab(i):
                 s, e = bounds[i]
-                _retrying(ip, lambda: _pull_range(ip, f, s, e, parts[i], e - s + 1))
+                _retrying(ip, lambda: _pull_range(ip, f, s, e, parts[i], e - s + 1, progress))
 
             with ThreadPoolExecutor(max_workers=chunks) as ex:
                 list(ex.map(grab, range(chunks)))
@@ -244,15 +313,20 @@ def _download_one(ip, label, f, dest, lock, c, chunks):
             with lock:
                 c["n"] += 1
                 c["bytes"] += size
-                print(f"  [{label}] OK    {name} ({size // 1_000_000} MB)")
+            if progress is not None:
+                progress.file_done()
+            _emit(f"  [{label}] OK    {name} ({size // 1_000_000} MB)")
         else:
             with lock:
                 c["fail"] += 1
-                print(f"  [{label}] FAIL  {name} (size mismatch; .part kept for resume)")
+            _emit(f"  [{label}] FAIL  {name} (size mismatch; .part kept for resume)")
     except Exception as e:
         with lock:
             c["fail"] += 1
-            print(f"  [{label}] FAIL  {name}: {e}  (.part kept for resume)")
+        _emit(f"  [{label}] FAIL  {name}: {e}  (.part kept for resume)")
+    finally:
+        if progress is not None:
+            progress.set_active(label, None)
 
 
 def download_all(jobs, dest, lock=None, counters=None, parallel=False, chunks=1):
@@ -263,16 +337,32 @@ def download_all(jobs, dest, lock=None, counters=None, parallel=False, chunks=1)
     lock = lock or threading.Lock()
     c = counters if counters is not None else {"n": 0, "bytes": 0, "fail": 0}
 
+    total_bytes = sum(f["size"] for _, _, files in jobs for f in files)
+    total_files = sum(len(files) for _, _, files in jobs)
+    progress = Progress(total_bytes, total_files)
+    reporter = None
+    if _TTY:                              # live status line only makes sense on a terminal
+        reporter = threading.Thread(target=_reporter, args=(progress,), daemon=True)
+        reporter.start()
+
     def camera_worker(label, ip, files):
         for f in files:
-            _download_one(ip, label, f, dest, lock, c, chunks)
+            _download_one(ip, label, f, dest, lock, c, chunks, progress)
 
-    if parallel and len(jobs) > 1:
-        with ThreadPoolExecutor(max_workers=len(jobs)) as ex:
-            list(ex.map(lambda j: camera_worker(*j), jobs))
-    else:
-        for label, ip, files in jobs:
-            camera_worker(label, ip, files)
+    try:
+        if parallel and len(jobs) > 1:
+            with ThreadPoolExecutor(max_workers=len(jobs)) as ex:
+                list(ex.map(lambda j: camera_worker(*j), jobs))
+        else:
+            for label, ip, files in jobs:
+                camera_worker(label, ip, files)
+    finally:
+        progress.stop = True
+        if reporter is not None:
+            reporter.join(timeout=1.0)
+            with _print_lock:
+                sys.stdout.write("\r\033[K")
+                sys.stdout.flush()
     return c
 
 

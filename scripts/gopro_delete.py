@@ -114,12 +114,26 @@ def run_deletion(targets, yes, what):
             return 0, 0
 
     ok = fail = 0
-    for lbl, ip, f in targets:
+    freed = 0
+    tty = sys.stdout.isatty()
+    for i, (lbl, ip, f) in enumerate(targets, 1):
         if delete_file(ip, f):
             ok += 1
-            print(f"  [{lbl}] deleted {f['name']}")
+            freed += f["size"]
         else:
             fail += 1
+        pct = i / n * 100
+        filled = int(pct / 5)
+        bar = "#" * filled + "-" * (20 - filled)
+        line = f">>> [{bar}] {pct:4.0f}%  deleting {i}/{n}  {freed // 1_000_000} MB freed"
+        if tty:
+            sys.stdout.write("\r\033[K" + line)
+            sys.stdout.flush()
+        else:
+            print(f"  [{lbl}] deleted {f['name']}")
+    if tty:
+        sys.stdout.write("\n")
+        sys.stdout.flush()
     print(f">>> deleted {ok} clip(s), {fail} failure(s).")
     return ok, fail
 
