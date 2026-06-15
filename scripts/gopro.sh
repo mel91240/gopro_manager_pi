@@ -37,12 +37,15 @@ ensure_dest() {
 do_download() {
     ensure_dest || { pause; return; }
     echo ">>> Destination : $DEST"
-    read -rp "  Tout copier [a] ou choisir [p] ? (a/p, défaut a) : " m
+    read -rp "  Tout copier [a], choisir [p], ou annuler [q] ? (a/p/q, défaut a) : " m
+    case "${m:-a}" in
+        q|c) echo ">>> annulé."; pause; return ;;
+    esac
     # The manager can stay up (the robust downloader tolerates its state polls)
     # and the auto-revive watcher stays on (it only ever acts on a camera that has
     # FALLEN OFF the bus -- which doesn't happen mid-copy, and if it did a
     # power-cycle is exactly the recovery we want; the download just resumes).
-    if [ "${m:-a}" = "p" ]; then
+    if [ "$m" = "p" ]; then
         GOPRO_DEST="$DEST" python3 "$DIR/gopro_download.py" --pick
     else
         GOPRO_DEST="$DEST" python3 "$DIR/gopro_download.py"
@@ -52,11 +55,11 @@ do_download() {
 
 do_delete() {
     echo ">>> Suppression média sur les caméras (IRRÉVERSIBLE)"
-    read -rp "  Tout vider [a], choisir [p], ou annuler [c] ? (a/p/c, défaut p) : " m
+    read -rp "  Tout vider [a], choisir [p], ou annuler [q] ? (a/p/q, défaut p) : " m
     case "${m:-p}" in
-        a) python3 "$DIR/gopro_delete.py" --all ;;
-        c) echo ">>> annulé." ;;
-        *) python3 "$DIR/gopro_delete.py" --pick ;;
+        a)   python3 "$DIR/gopro_delete.py" --all ;;
+        q|c) echo ">>> annulé." ;;
+        *)   python3 "$DIR/gopro_delete.py" --pick ;;
     esac
     pause
 }

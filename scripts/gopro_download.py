@@ -226,7 +226,6 @@ class Progress:
         self.total_files = total_files
         self.done = 0
         self.files_done = 0
-        self.active = {}          # label -> current filename
         self.lock = threading.Lock()
         self.t0 = time.monotonic()
         self.stop = False
@@ -239,15 +238,10 @@ class Progress:
         with self.lock:
             self.files_done += 1
 
-    def set_active(self, label, name):
-        with self.lock:
-            self.active[label] = name
-
     def render(self):
         with self.lock:
             done, total = self.done, self.total
             fd, ft = self.files_done, self.total_files
-            act = ", ".join(n for n in self.active.values() if n)
         el = time.monotonic() - self.t0
         spd = done / el / 1e6 if el > 0 else 0.0
         pct = done / total * 100 if total else 100.0
@@ -255,9 +249,8 @@ class Progress:
         m, s = divmod(int(eta), 60)
         filled = int(pct / 5)
         bar = "#" * filled + "-" * (20 - filled)
-        line = (f">>> [{bar}] {pct:4.1f}%  {done/1e9:.2f}/{total/1e9:.2f} GB  "
+        return (f">>> [{bar}] {pct:4.1f}%  {done/1e9:.2f}/{total/1e9:.2f} GB  "
                 f"{spd:5.1f} MB/s  ETA {m:d}:{s:02d}  files {fd}/{ft}")
-        return line + (f"  ({act})" if act else "")
 
 
 def _reporter(progress):
@@ -278,10 +271,7 @@ def _download_one(ip, label, f, dest, lock, c, chunks, progress=None):
         if progress is not None:
             progress.add(size)
             progress.file_done()
-        _emit(f"  [{label}] have  {name}")
         return
-    if progress is not None:
-        progress.set_active(label, f["name"])
     tmp = out + ".part"
     try:
         if chunks <= 1 or size < 8_000_000:
@@ -315,7 +305,6 @@ def _download_one(ip, label, f, dest, lock, c, chunks, progress=None):
                 c["bytes"] += size
             if progress is not None:
                 progress.file_done()
-            _emit(f"  [{label}] OK    {name} ({size // 1_000_000} MB)")
         else:
             with lock:
                 c["fail"] += 1
@@ -324,9 +313,6 @@ def _download_one(ip, label, f, dest, lock, c, chunks, progress=None):
         with lock:
             c["fail"] += 1
         _emit(f"  [{label}] FAIL  {name}: {e}  (.part kept for resume)")
-    finally:
-        if progress is not None:
-            progress.set_active(label, None)
 
 
 def download_all(jobs, dest, lock=None, counters=None, parallel=False, chunks=1):
@@ -424,9 +410,12 @@ def pick(jobs):
         print(f"  {i:>2}  {lbl:<6}  {_ts(f['cre'])}  {f['size'] // 1_000_000:>4} MB  {f['name']} {dur}")
     print()
     try:
-        sel = input("  Which to copy? (e.g. 1-3,5  /  Enter or 'all' = everything): ")
+        sel = input("  Which to copy? (e.g. 1-3,5  /  'all'  /  q = annuler) : ")
     except EOFError:
         sel = "all"
+    if sel.strip().lower() in ("q", "quit", "cancel", "annuler"):
+        print(">>> annulé (rien copié).")
+        return []
     keep = _parse_selection(sel, len(flat))
     chosen = {}
     for i, (lbl, ip, f) in enumerate(flat):

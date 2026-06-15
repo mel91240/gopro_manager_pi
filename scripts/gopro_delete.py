@@ -129,8 +129,6 @@ def run_deletion(targets, yes, what):
         if tty:
             sys.stdout.write("\r\033[K" + line)
             sys.stdout.flush()
-        else:
-            print(f"  [{lbl}] deleted {f['name']}")
     if tty:
         sys.stdout.write("\n")
         sys.stdout.flush()
@@ -178,9 +176,12 @@ def main():
         what = "ALL media"
     else:                                    # --pick
         try:
-            sel = input("\n  Which to DELETE? (e.g. 1-3,5  /  'all' = everything): ")
+            sel = input("\n  Which to DELETE? (e.g. 1-3,5  /  'all'  /  q = annuler) : ")
         except EOFError:
             sel = ""
+        if sel.strip().lower() in ("", "q", "quit", "cancel", "annuler"):
+            print(">>> annulé (rien supprimé).")
+            return 0
         keep = gd._parse_selection(sel, len(flat))
         targets = [flat[i] for i in sorted(keep)]
         what = "selected clips"
