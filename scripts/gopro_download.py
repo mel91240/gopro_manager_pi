@@ -43,7 +43,6 @@ import argparse
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 import threading
@@ -185,6 +184,30 @@ def _pull_range(ip, f, start, end, part, target, progress=None):
         r.close()
 
 
+def _pull_chunk(ip, f, fd, start, end, progress=None):
+    """Download byte range [start, end] of f and write it DIRECTLY at its absolute
+    offset into the shared file descriptor fd (os.pwrite -- thread-safe positioned
+    write, no shared file offset). Used by the chunked path so there is no temp
+    part + concatenation pass. Re-fetches the whole range on retry (not resumable
+    across runs); the single-connection path is the resumable/robust one."""
+    req = Request(_url(ip, f), headers={"Range": f"bytes={start}-{end}"})
+    r = urlopen(req, timeout=READ_TIMEOUT)
+    try:
+        if r.getcode() != 206:
+            raise IOError(f"range not honored (HTTP {r.getcode()})")
+        offset = start
+        while True:
+            b = r.read(1 << 20)
+            if not b:
+                break
+            os.pwrite(fd, b, offset)
+            offset += len(b)
+            if progress is not None:
+                progress.add(len(b))
+    finally:
+        r.close()
+
+
 def _retrying(ip, fn):
     """Run fn() with RETRIES attempts; re-init the camera + back off on failure."""
     last = None
@@ -197,13 +220,6 @@ def _retrying(ip, fn):
             _reinit(ip)
             time.sleep(BACKOFF)
     raise last if last else IOError("download failed")
-
-
-def _silent_rm(p):
-    try:
-        os.remove(p)
-    except OSError:
-        pass
 
 
 # --- live progress (one self-updating line: % / GB / MB/s / ETA / files) ------
@@ -289,25 +305,24 @@ def _download_one(ip, label, f, dest, lock, c, chunks, progress=None):
             # single resumable connection (most robust; ideal for flaky cams)
             _retrying(ip, lambda: _pull_range(ip, f, 0, size - 1, tmp, size, progress))
         else:
-            # N parallel Range connections, each independently retried/resumed,
-            # then concatenated. Range is known-supported on this rig (HTTP 206).
+            # N parallel Range connections written DIRECTLY at their offset into one
+            # pre-allocated file (os.pwrite) -- no temp parts, no concatenation pass,
+            # so chunking is a real speedup. Range is known-supported here (HTTP 206).
             step = size // chunks
             bounds = [(i * step, (size - 1 if i == chunks - 1 else (i + 1) * step - 1))
                       for i in range(chunks)]
-            parts = [f"{tmp}.p{i}" for i in range(chunks)]
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+            try:
+                os.ftruncate(fd, size)
 
-            def grab(i):
-                s, e = bounds[i]
-                _retrying(ip, lambda: _pull_range(ip, f, s, e, parts[i], e - s + 1, progress))
+                def grab(b):
+                    s, e = b
+                    _retrying(ip, lambda: _pull_chunk(ip, f, fd, s, e, progress))
 
-            with ThreadPoolExecutor(max_workers=chunks) as ex:
-                list(ex.map(grab, range(chunks)))
-            with open(tmp, "wb") as o:
-                for p in parts:
-                    with open(p, "rb") as src:
-                        shutil.copyfileobj(src, o)
-            for p in parts:
-                _silent_rm(p)
+                with ThreadPoolExecutor(max_workers=chunks) as ex:
+                    list(ex.map(grab, bounds))
+            finally:
+                os.close(fd)
 
         if os.path.getsize(tmp) == size:
             os.replace(tmp, out)
