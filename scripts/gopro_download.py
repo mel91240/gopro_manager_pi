@@ -1,51 +1,106 @@
 #!/usr/bin/env python3
 """Offload recorded videos from the GoPros to the Pi (or any destination).
 
-Cameras are downloaded ONE AT A TIME by default. Benchmarking this rig
-(gopro_bench.py) showed a single camera reaches ~37 MB/s, but running both at
-once collapses the USB2 camera to ~1.4 MB/s (a shared upstream bottleneck --
-the powered hub's uplink / the Pi's USB host), so sequential is ~5x faster here.
-Use --parallel only if your hardware actually benefits.
+ROBUST by design -- this rig's cameras occasionally reboot or drop into the
+"USB Connected" file-transfer mode mid-copy (the :8080 server vanishes). So every
+file is downloaded with:
+  * a SHORT per-read socket timeout (a stalled camera is detected in seconds,
+    not minutes),
+  * automatic RETRY per file,
+  * a re-init of the camera (wired_usb?p=1) on failure, which pulls it back out
+    of "USB Connected" mode,
+  * byte-level RESUME via HTTP Range: an interrupted file keeps its <name>.part
+    and continues where it left off (across retries AND across whole re-runs).
+
+PARALLEL across cameras: benchmarking (gopro_bench.py) showed that when BOTH
+cameras sit on USB3 the two downloads run at full speed at once (~77 MB/s
+aggregate). But with a mixed USB2+USB3 wiring the USB2 camera collapses to
+~1.4 MB/s under contention. So the default is AUTO: parallel only when every
+camera reports a USB3 (5000 Mbps) link, otherwise sequential. Override with
+--parallel / --sequential.
+
+CHUNKED (--chunks N): split one file into N parallel Range connections (~1.3x on
+this rig). Each chunk is independently retried/resumed. Default 1 (most robust);
+the gain only matters when the destination disk is faster than one camera.
 
 Each clip is saved as  <dest>/<CAMERA>/<UTC-timestamp>_<name>.MP4 . The camera
-clock is synced (tzone=0) so the timestamp is real UTC -- segments of one
-mission line up across both cameras and across a reboot. Re-runnable: a file
-already present at the right size is skipped, so an interrupted run just resumes.
+clock is set by the operator to match the Pi/navigation clock, so the timestamp
+lines clips up across both cameras and across a reboot. A file already present at
+the right size is skipped -> an interrupted run just resumes.
 
-  ./download.sh                  all cameras -> ~/gopro_footage  (sequential)
-  ./download.sh --parallel       download cameras at once (slower on this rig)
+  ./download.sh                  all cameras -> ~/gopro_footage  (auto par/seq)
+  ./download.sh --parallel       force both cameras at once
+  ./download.sh --sequential     force one camera at a time
+  ./download.sh --chunks 4       split each file into 4 Range connections
   ./download.sh --pick           list the clips and ask which to copy
   ./download.sh --minsec 10      skip clips shorter than 10 s (queries duration)
   ./download.sh --all            include tiny (<2 MB) test clips too
-  GOPRO_DEST=/mnt/usb ./download.sh
+  GOPRO_DEST=/mnt/ssd ./download.sh
 
-This is also importable (used by the pi_menu): see download_all() / discover().
+Importable by the pi_menu: see discover() / gather() / download_all().
 """
 import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from urllib.request import urlopen
+from urllib.request import urlopen, Request
 
 PORT = 8080
 LABELS = ["LEFT", "RIGHT", "CAM2", "CAM3"]
 DEFAULT_MINSIZE = 2_000_000          # bytes; skips 0 s test clips with no extra call
 
+READ_TIMEOUT = 20                    # s; a per-read stall longer than this -> retry
+RETRIES = 6                          # attempts per file (or per chunk) before giving up
+BACKOFF = 2                          # s; pause after a failure (the camera re-init settles)
+REINIT_MIN_GAP = 3                   # s; don't re-init the same camera more often than this
+
 
 # --- camera discovery / HTTP -------------------------------------------------
 def discover():
-    """Return [(label, ip), ...] for each GoPro on the host's USB-ethernet buses
-    (Open GoPro answers on .51 of each 172.2x subnet), labelled like the manager."""
+    """Return [(label, ip, iface), ...] for each GoPro on the host's USB-ethernet
+    buses (Open GoPro answers on .51 of each 172.2x subnet), labelled like the
+    manager. iface lets us read the USB link speed to auto-pick parallel/seq."""
     out = subprocess.run(["ip", "-4", "-o", "addr", "show"],
                          capture_output=True, text=True).stdout
-    ips = sorted({re.sub(r"\.\d+$", ".51", m)
-                  for m in re.findall(r"172\.2[0-9]\.[0-9]+\.[0-9]+", out)})
-    return [(LABELS[i] if i < len(LABELS) else f"CAM{i}", ip) for i, ip in enumerate(ips)]
+    found = {}
+    for line in out.splitlines():
+        m = re.search(r"^\d+:\s+(\S+)\s+inet\s+(172\.2[0-9]\.[0-9]+)\.[0-9]+", line)
+        if m:
+            found[m.group(2) + ".51"] = m.group(1)        # cam_ip -> iface
+    cams = []
+    for i, ip in enumerate(sorted(found)):
+        cams.append((LABELS[i] if i < len(LABELS) else f"CAM{i}", ip, found[ip]))
+    return cams
+
+
+def usb_speed(iface):
+    """USB link speed in Mbps for a camera's ethernet-gadget iface (480=USB2,
+    5000=USB3), or None if it can't be read."""
+    try:
+        p = os.path.realpath(f"/sys/class/net/{iface}/device")
+        for _ in range(8):
+            sp = os.path.join(p, "speed")
+            if os.path.isfile(sp):
+                return int(open(sp).read().strip())
+            p = os.path.dirname(p)
+            if p in ("/", "/sys"):
+                break
+    except Exception:
+        pass
+    return None
+
+
+def auto_parallel(cams):
+    """True only when EVERY camera is on a USB3 (>=5000 Mbps) link -- the one
+    case the benchmark proved parallel helps instead of starving a USB2 cam."""
+    speeds = [usb_speed(iface) for _, _, iface in cams]
+    return bool(speeds) and all(s is not None and s >= 5000 for s in speeds)
 
 
 def _get(ip, path, timeout=15):
@@ -54,7 +109,7 @@ def _get(ip, path, timeout=15):
 
 
 def media_list(ip):
-    """Flat list of video files on one camera: dict(dir,name,size,cre)."""
+    """Flat list of video files on one camera: dict(dir,name,size,cre,dur)."""
     data = json.loads(_get(ip, "/gopro/media/list"))
     files = []
     for m in data.get("media", []):
@@ -77,65 +132,143 @@ def fetch_duration(ip, f):
     return f
 
 
-# --- download ----------------------------------------------------------------
-def _ts(epoch):
-    return time.strftime("%Y%m%d_%H%M%S", time.gmtime(epoch)) if epoch else "nodate"
+# --- robust download ---------------------------------------------------------
+_reinit_state = {}                   # ip -> last reinit monotonic time
+_reinit_lock = threading.Lock()
 
 
-def _download_one(ip, label, f, dest, lock, c):
+def _reinit(ip):
+    """Pull a camera back into Open GoPro wired-control mode (out of "USB
+    Connected"). Throttled so concurrent chunk threads don't storm it."""
+    with _reinit_lock:
+        last = _reinit_state.get(ip, 0)
+        now = time.monotonic()
+        if now - last < REINIT_MIN_GAP:
+            return
+        _reinit_state[ip] = now
+    try:
+        _get(ip, "/gopro/camera/control/wired_usb?p=1", timeout=8)
+    except Exception:
+        pass
+
+
+def _url(ip, f):
+    return f"http://{ip}:{PORT}/videos/DCIM/{f['dir']}/{f['name']}"
+
+
+def _pull_range(ip, f, start, end, part, target):
+    """Append the byte range [start+have, end] of file f into `part`, resuming
+    if `part` already holds some of it. Returns when `part` reaches `target`
+    bytes; raises on any network/stall error (caught by the retry loop)."""
+    have = os.path.getsize(part) if os.path.exists(part) else 0
+    if have >= target:
+        return
+    headers = {"Range": f"bytes={start + have}-{end}"} if (start + have or end) else {}
+    req = Request(_url(ip, f), headers=headers)
+    r = urlopen(req, timeout=READ_TIMEOUT)
+    try:
+        code = r.getcode()
+        if have and code != 206:                  # server ignored our resume offset
+            if os.path.exists(part):
+                os.remove(part)
+            raise IOError(f"range not honored (HTTP {code}); restarting file")
+        with open(part, "ab" if (have and code == 206) else "wb") as o:
+            while True:
+                b = r.read(1 << 20)
+                if not b:
+                    break
+                o.write(b)
+    finally:
+        r.close()
+
+
+def _retrying(ip, fn):
+    """Run fn() with RETRIES attempts; re-init the camera + back off on failure."""
+    last = None
+    for _ in range(RETRIES):
+        try:
+            fn()
+            return
+        except Exception as e:
+            last = e
+            _reinit(ip)
+            time.sleep(BACKOFF)
+    raise last if last else IOError("download failed")
+
+
+def _silent_rm(p):
+    try:
+        os.remove(p)
+    except OSError:
+        pass
+
+
+def _download_one(ip, label, f, dest, lock, c, chunks):
     name = f"{_ts(f['cre'])}_{f['name']}"
     outdir = os.path.join(dest, label)
     os.makedirs(outdir, exist_ok=True)
     out = os.path.join(outdir, name)
-    if os.path.exists(out) and os.path.getsize(out) == f["size"]:
+    size = f["size"]
+    if os.path.exists(out) and os.path.getsize(out) == size:
         with lock:
             print(f"  [{label}] have  {name}")
         return
-    url = f"http://{ip}:{PORT}/videos/DCIM/{f['dir']}/{f['name']}"
     tmp = out + ".part"
     try:
-        with urlopen(url, timeout=1800) as r, open(tmp, "wb") as o:
-            while True:
-                chunk = r.read(1 << 20)
-                if not chunk:
-                    break
-                o.write(chunk)
-        if os.path.getsize(tmp) == f["size"]:
+        if chunks <= 1 or size < 8_000_000:
+            # single resumable connection (most robust; ideal for flaky cams)
+            _retrying(ip, lambda: _pull_range(ip, f, 0, size - 1, tmp, size))
+        else:
+            # N parallel Range connections, each independently retried/resumed,
+            # then concatenated. Range is known-supported on this rig (HTTP 206).
+            step = size // chunks
+            bounds = [(i * step, (size - 1 if i == chunks - 1 else (i + 1) * step - 1))
+                      for i in range(chunks)]
+            parts = [f"{tmp}.p{i}" for i in range(chunks)]
+
+            def grab(i):
+                s, e = bounds[i]
+                _retrying(ip, lambda: _pull_range(ip, f, s, e, parts[i], e - s + 1))
+
+            with ThreadPoolExecutor(max_workers=chunks) as ex:
+                list(ex.map(grab, range(chunks)))
+            with open(tmp, "wb") as o:
+                for p in parts:
+                    with open(p, "rb") as src:
+                        shutil.copyfileobj(src, o)
+            for p in parts:
+                _silent_rm(p)
+
+        if os.path.getsize(tmp) == size:
             os.replace(tmp, out)
             with lock:
                 c["n"] += 1
-                c["bytes"] += f["size"]
-                print(f"  [{label}] OK    {name} ({f['size'] // 1_000_000} MB)")
+                c["bytes"] += size
+                print(f"  [{label}] OK    {name} ({size // 1_000_000} MB)")
         else:
-            os.remove(tmp)
             with lock:
                 c["fail"] += 1
-                print(f"  [{label}] FAIL  {name} (size mismatch)")
+                print(f"  [{label}] FAIL  {name} (size mismatch; .part kept for resume)")
     except Exception as e:
-        if os.path.exists(tmp):
-            os.remove(tmp)
         with lock:
             c["fail"] += 1
-            print(f"  [{label}] FAIL  {name}: {e}")
+            print(f"  [{label}] FAIL  {name}: {e}  (.part kept for resume)")
 
 
-def download_all(jobs, dest, lock=None, counters=None, parallel=False):
+def download_all(jobs, dest, lock=None, counters=None, parallel=False, chunks=1):
     """jobs = [(label, ip, [file,...]), ...]. Returns the counters dict.
 
-    Default is SEQUENTIAL (one camera at a time): on this rig the benchmark
-    showed that downloading both cameras at once collapses the USB2 camera to
-    ~1.4 MB/s (shared upstream bottleneck), whereas one-at-a-time each gets the
-    full ~37 MB/s. parallel=True keeps the old all-at-once behaviour for
-    hardware that actually benefits."""
+    parallel: download cameras at once (use only when all cameras are USB3 --
+    see auto_parallel()). chunks: split each file into N Range connections."""
     lock = lock or threading.Lock()
     c = counters if counters is not None else {"n": 0, "bytes": 0, "fail": 0}
 
     def camera_worker(label, ip, files):
         for f in files:
-            _download_one(ip, label, f, dest, lock, c)
+            _download_one(ip, label, f, dest, lock, c, chunks)
 
-    if parallel:
-        with ThreadPoolExecutor(max_workers=max(1, len(jobs))) as ex:
+    if parallel and len(jobs) > 1:
+        with ThreadPoolExecutor(max_workers=len(jobs)) as ex:
             list(ex.map(lambda j: camera_worker(*j), jobs))
     else:
         for label, ip, files in jobs:
@@ -143,13 +276,17 @@ def download_all(jobs, dest, lock=None, counters=None, parallel=False):
     return c
 
 
+def _ts(epoch):
+    return time.strftime("%Y%m%d_%H%M%S", time.gmtime(epoch)) if epoch else "nodate"
+
+
 # --- candidate gathering / filtering -----------------------------------------
 def gather(cams, minsize, minsec):
     """Return [(label, ip, [file,...]), ...] after size/duration filtering.
-    Duration is fetched (in parallel) only when minsec > 0."""
+    cams = [(label, ip, iface), ...]. Duration is fetched only when minsec > 0."""
     jobs = []
     all_for_dur = []
-    for label, ip in cams:
+    for label, ip, _iface in cams:
         try:
             files = media_list(ip)
         except Exception as e:
@@ -210,10 +347,11 @@ def pick(jobs):
 
 # --- CLI ---------------------------------------------------------------------
 def main():
-    ap = argparse.ArgumentParser(description="Offload GoPro videos to the Pi (parallel).")
+    ap = argparse.ArgumentParser(description="Offload GoPro videos (robust + resumable).")
     ap.add_argument("--pick", action="store_true", help="list clips and choose which to copy")
-    ap.add_argument("--parallel", action="store_true",
-                    help="download cameras at once (slower on this rig -- see gopro_bench.py)")
+    ap.add_argument("--parallel", action="store_true", help="force both cameras at once")
+    ap.add_argument("--sequential", action="store_true", help="force one camera at a time")
+    ap.add_argument("--chunks", type=int, default=1, help="split each file into N Range connections")
     ap.add_argument("--all", action="store_true", help="include tiny (<2 MB) test clips")
     ap.add_argument("--minsec", type=int, default=0, help="skip clips shorter than N seconds")
     ap.add_argument("--minsize", type=int, default=None, help="skip clips smaller than N bytes")
@@ -226,11 +364,20 @@ def main():
     if not cams:
         print("No GoPro found on the USB bus.")
         return 1
+
+    if args.parallel:
+        parallel = True
+    elif args.sequential:
+        parallel = False
+    else:
+        parallel = auto_parallel(cams)
+
     if (subprocess.run(["docker", "ps", "--format", "{{.Names}}"],
                        capture_output=True, text=True).stdout.split().count("gopro_manager")):
         print("(note: manager is running -- ./manager_down.sh first if a download stalls)")
 
-    print(f">>> {len(cams)} camera(s): " + ", ".join(f"{l}({ip})" for l, ip in cams))
+    links = ", ".join(f"{l}({ip},{usb_speed(ifc) or '?'}M)" for l, ip, ifc in cams)
+    print(f">>> {len(cams)} camera(s): {links}")
     jobs = gather(cams, minsize, args.minsec)
     if not jobs:
         print(">>> nothing to copy (after filtering).")
@@ -242,10 +389,17 @@ def main():
             return 0
 
     total = sum(len(f) for _, _, f in jobs)
-    mode = "in parallel" if args.parallel else "sequentially"
-    print(f">>> downloading {total} clip(s) from {len(jobs)} camera(s) {mode} -> {args.dest}")
-    c = download_all(jobs, args.dest, parallel=args.parallel)
-    print(f">>> done: {c['n']} file(s), {c['bytes'] // 1_000_000} MB -> {args.dest}   (failures: {c['fail']})")
+    mode = "parallel" if parallel else "sequential"
+    if not (args.parallel or args.sequential):
+        mode += " (auto)"
+    ch = f", {args.chunks}-way chunked" if args.chunks > 1 else ""
+    print(f">>> downloading {total} clip(s) from {len(jobs)} camera(s) [{mode}{ch}] -> {args.dest}")
+    t0 = time.time()
+    c = download_all(jobs, args.dest, parallel=parallel, chunks=max(1, args.chunks))
+    dt = time.time() - t0
+    rate = (c["bytes"] / dt / 1e6) if dt else 0
+    print(f">>> done: {c['n']} file(s), {c['bytes'] // 1_000_000} MB in {dt:.0f}s "
+          f"({rate:.1f} MB/s) -> {args.dest}   (failures: {c['fail']})")
     return 1 if c["fail"] else 0
 
 

@@ -6,3 +6,6 @@ log/
 *.egg-info/
 .gopro_ref
 .recording_intent
+
+# local-only operator notes -- may contain Pi/WiFi credentials, never commit (public repo)
+HANDOFF.md
