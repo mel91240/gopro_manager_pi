@@ -1,0 +1,19 @@
+[Unit]
+Description=GoPro manager (arm cameras, recording, watchdog/EMERGENCY signal)
+After=docker.service network-online.target
+Wants=docker.service
+
+[Service]
+# manager_up.sh launches a DETACHED docker container and returns, so this is a
+# oneshot that stays "active" afterwards; the container itself (and its docker
+# --restart unless-stopped) keeps it alive at runtime, systemd (re)starts it at boot.
+Type=oneshot
+RemainAfterExit=yes
+User=pi
+Environment=HOME=/home/pi
+# absolute path -- adjust if the repo lives elsewhere on the Pi
+ExecStart=/home/pi/dev/swarm-vehicle/gopro_scripts/manager_up.sh
+ExecStop=/home/pi/dev/swarm-vehicle/gopro_scripts/manager_down.sh
+
+[Install]
+WantedBy=multi-user.target
