@@ -9,6 +9,7 @@ over ROS 2 services and reads its published GoProSystem state.
 """
 import select
 import sys
+import termios
 import threading
 import time
 
@@ -76,6 +77,18 @@ def _print_menu(node):
     print('  [3] Change settings')
     print('  [0] Exit')
     print('Command: ', end='', flush=True)
+
+
+def _flush_input():
+    """Discard anything already sitting in the terminal input buffer (e.g. keys
+    or Enters pressed during the slow DDS discovery, when stdin isn't being
+    read). Without this the first menu prompt reads a stale buffered newline ->
+    choice='' -> a spurious 'Unknown command', desyncing every keystroke from
+    the prompt. No-op when stdin isn't a TTY (piped)."""
+    try:
+        termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)
+    except Exception:
+        pass
 
 
 def _await_command(node, refresh=3.0):
@@ -151,6 +164,7 @@ def main(args=None):
         print('.', end='', flush=True)
         time.sleep(0.5)
     print(' connected.' if node.system is not None else ' not found (is the manager up?).')
+    _flush_input()      # drop keystrokes typed during discovery so [0]/[1].. read clean
 
     try:
         while True:
@@ -180,6 +194,8 @@ def main(args=None):
 
             elif choice == '0':
                 break
+            elif choice == '':
+                continue            # bare Enter / stray newline -> just redraw, not an error
             else:
                 print('Unknown command.')
 
