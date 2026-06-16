@@ -129,7 +129,17 @@ class GoProManagerNode(Node):
         socket keeps its label (LEFT/RIGHT) across camera swaps -- even when the
         other socket is momentarily empty. A camera in a never-seen socket takes
         the next free configured label. Cameras with no resolvable socket keep
-        discover()'s order-based label."""
+        discover()'s order-based label.
+
+        When idle, the labels of sockets that are no longer present are released
+        first, so a camera moved to a DIFFERENT socket can reuse a freed label
+        instead of clashing with an empty socket's stale entry (which would leave
+        two cameras sharing a label and wedge the system in INITIALIZING). The
+        map is left untouched while recording (a dropped camera is recovering)."""
+        present = {(c.hub, c.port) for c in cams if c.hub and c.port}
+        if not self.recording:
+            self._label_by_slot = {s: l for s, l in self._label_by_slot.items()
+                                   if s in present}
         used = set(self._label_by_slot.values())
         for cam in cams:
             if not cam.hub or not cam.port:
