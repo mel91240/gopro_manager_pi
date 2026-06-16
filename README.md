@@ -70,13 +70,16 @@ tests/             # automated ROS-interface test suite
 **Resilience (autonomous)**
 - **Adopt in-progress recording**: if the manager restarts while filming, it
   detects and adopts the recording (no re-arm, no beep).
-- **Watchdog**: a camera that stops/drops → `DEGRADED`, retried in software
-  (re-arm + restart, **no power-cycle**). Recovers as soon as it answers again.
-- **EMERGENCY signal**: a single camera unrecoverable past `fault_after` (or SD
-  unusable), **or all cameras dropping at once** (nothing is being filmed →
-  immediate, no wait) → state `FAULT` = the emergency signal the autonomy layer
-  consumes (`state == GoProSystem.STATE_FAULT`) to hold the vehicle / surface the
-  AUV. Keeps retrying, so it self-clears the instant a camera returns.
+- **Watchdog**: a camera that stops/drops → `DEGRADED` while its **first**
+  recovery attempt is in flight (re-arm + restart, **no power-cycle**); the AUV
+  can slow down. Recovers as soon as it answers again.
+- **EMERGENCY signal** (`FAULT` = the AUV should stop): raised as soon as a
+  dropped camera's **first recovery attempt has failed** (kept retrying), **or**
+  all cameras drop at once (nothing is filmed → immediate), **or** a camera is
+  SD-unusable, **or** — as a backstop — any camera stays lost past `fault_after`
+  (e.g. a slow self-repair that never reached a retry). `FAULT` is what the
+  autonomy layer consumes (`state == GoProSystem.STATE_FAULT`); it self-clears
+  the instant the camera records again.
 - **Auto-resume after reboot**: a persistent intent flag means an involuntary
   reboot that interrupted a mission **resumes recording on its own** (a new,
   timestamped segment).

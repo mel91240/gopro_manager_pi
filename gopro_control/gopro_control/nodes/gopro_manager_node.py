@@ -74,6 +74,7 @@ class GoProManagerNode(Node):
         self._grace_until = {}
         self._cooldown_until = {}
         self._recovering = {}       # label -> monotonic time it dropped (soft, being retried)
+        self._recover_attempts = {} # label -> recovery cycles tried (0 = drop seen, not retried yet)
         self._faulted = {}          # label -> reason (hard fault: reachable but SD unusable)
         self._ready = set()         # labels armed and verified
         self._started = False       # discovery+arm done
@@ -217,6 +218,7 @@ class GoProManagerNode(Node):
         self.recording = len(started) > 0
         self._strikes = {c.label: 0 for c in self.cameras}
         self._recovering.clear()
+        self._recover_attempts.clear()
         grace = time.monotonic() + self.grace_period
         for c in self.cameras:
             self._grace_until[c.label] = grace
@@ -276,6 +278,7 @@ class GoProManagerNode(Node):
                 self._set_intent(True)          # remember it across a reboot -> auto-resume
             self._strikes = {c.label: 0 for c in self.cameras}
             self._recovering.clear()
+            self._recover_attempts.clear()
             self._faulted.clear()
             grace = time.monotonic() + self.grace_period   # encoder-init grace
             for c in self.cameras:
@@ -296,6 +299,7 @@ class GoProManagerNode(Node):
             self.recording = False
             self._set_intent(False)       # clean stop -> do NOT auto-resume after a reboot
             self._recovering.clear()      # mission ended -- stop chasing dropped cams
+            self._recover_attempts.clear()
             self._faulted.clear()
             failed = [lbl for lbl, ok in results.items() if not ok]
             success = not failed
@@ -378,6 +382,7 @@ class GoProManagerNode(Node):
             self.get_logger().info(f'[{cam.label}] recording recovered.')
         self._recovering.pop(cam.label, None)
         self._faulted.pop(cam.label, None)
+        self._recover_attempts.pop(cam.label, None)
         self._strikes[cam.label] = 0
 
     def _recover(self, cam, now):
@@ -388,6 +393,7 @@ class GoProManagerNode(Node):
         no usable SD cannot be fixed in software, so it is flagged as a hard
         fault -- but still re-checked, in case the card is swapped back."""
         self._cooldown_until[cam.label] = now + self.restart_cooldown
+        self._recover_attempts[cam.label] = self._recover_attempts.get(cam.label, 0) + 1
         if not cam.reachable(timeout=2):
             self.get_logger().warn(f'[{cam.label}] still disconnected -- will keep retrying.')
             return
@@ -443,10 +449,17 @@ class GoProManagerNode(Node):
         elif self._recovering:
             labels = sorted(self._recovering)
             worst = max(now - t for t in self._recovering.values())
-            if worst >= self.fault_after:        # down too long -> warn the surface
+            # DEGRADED = a camera just dropped and its FIRST recovery attempt is
+            # still in flight -> the AUV may slow down. It escalates to FAULT (the
+            # AUV should stop) as soon as that first attempt has FAILED, while we
+            # keep retrying. Backstop: FAULT anyway if a camera has been lost past
+            # fault_after (e.g. a slow self-repair that never reached a retry).
+            # FAULT self-clears the instant the camera records again.
+            failed = any(self._recover_attempts.get(l, 0) >= 1 for l in self._recovering)
+            if failed or worst >= self.fault_after:
                 self.state = GoProSystem.STATE_FAULT
-                self.message = (f'MISSION COMPROMISED -- {labels} lost '
-                                f'{int(worst)}s (still retrying)')
+                why = 'recovery failed' if failed else f'lost {int(worst)}s'
+                self.message = f'MISSION COMPROMISED -- {labels} ({why}, still retrying)'
             else:
                 self.state = GoProSystem.STATE_DEGRADED
                 self.message = f'{recording_now}/{n} recording, recovering {labels}'
