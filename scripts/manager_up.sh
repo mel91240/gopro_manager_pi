@@ -17,8 +17,13 @@ fi
 docker rm -f "$NAME" >/dev/null 2>&1 || true
 
 echo ">>> Starting persistent GoPro manager (arming cameras)..."
+# No --ipc host on purpose: a private /dev/shm dies with the container, so a
+# hard `docker rm -f` can never leak FastDDS shared-memory segments onto the
+# host (which silently breaks DDS data delivery after a few restarts). DDS then
+# talks to the menu/autonomy over UDP localhost (--network host), which is
+# robust and plenty for these tiny status messages.
 docker run -d --name "$NAME" --restart unless-stopped \
-    --network host --ipc host \
+    --network host \
     -e ROS_DOMAIN_ID=0 -e ROS_LOCALHOST_ONLY=1 \
     -v "$WS":/home/cosma_auv/swarm-vehicle \
     --entrypoint bash "$IMAGE" -lc '

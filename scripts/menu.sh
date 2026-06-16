@@ -14,7 +14,9 @@ if ! docker ps --format '{{.Names}}' | grep -qx gopro_manager; then
     exit 1
 fi
 
-docker run --rm -it --network host --ipc host \
+# No --ipc host (matches manager_up.sh): private /dev/shm, DDS over UDP
+# localhost. Avoids leaking FastDDS shared-memory segments onto the host.
+docker run --rm -it --network host \
     -e ROS_DOMAIN_ID=0 -e ROS_LOCALHOST_ONLY=1 \
     -v "$WS":/home/cosma_auv/swarm-vehicle \
     --entrypoint bash "$IMAGE" -lc '
