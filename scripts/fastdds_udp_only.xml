@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!-- Force the GoPro DDS participants (manager + menu) onto UDP only, disabling
+     the FastDDS shared-memory transport. SHM is the default on a single host,
+     but across Docker containers each has its own /dev/shm, so a writer's SHM
+     segment is invisible to a reader in another container: topics are discovered
+     yet no data is ever delivered (and a hard `docker rm -f` leaks SHM segments
+     onto the host when --ipc host is used). UDP localhost (ROS_LOCALHOST_ONLY=1
+     restricts it to loopback) is robust for these tiny status messages and never
+     leaks. Pointed to by FASTRTPS_DEFAULT_PROFILES_FILE in manager_up.sh/menu.sh. -->
+<dds xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
+  <profiles>
+    <transport_descriptors>
+      <transport_descriptor>
+        <transport_id>udp_only_transport</transport_id>
+        <type>UDPv4</type>
+      </transport_descriptor>
+    </transport_descriptors>
+    <participant profile_name="udp_only" is_default_profile="true">
+      <rtps>
+        <userTransports>
+          <transport_id>udp_only_transport</transport_id>
+        </userTransports>
+        <useBuiltinTransports>false</useBuiltinTransports>
+      </rtps>
+    </participant>
+  </profiles>
+</dds>

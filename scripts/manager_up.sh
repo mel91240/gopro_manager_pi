@@ -17,14 +17,16 @@ fi
 docker rm -f "$NAME" >/dev/null 2>&1 || true
 
 echo ">>> Starting persistent GoPro manager (arming cameras)..."
-# No --ipc host on purpose: a private /dev/shm dies with the container, so a
-# hard `docker rm -f` can never leak FastDDS shared-memory segments onto the
-# host (which silently breaks DDS data delivery after a few restarts). DDS then
-# talks to the menu/autonomy over UDP localhost (--network host), which is
-# robust and plenty for these tiny status messages.
+# DDS transport: force UDP-only via fastdds_udp_only.xml (no --ipc host). Across
+# containers, FastDDS otherwise picks shared-memory (same host) but each
+# container has a private /dev/shm, so the menu/autonomy discover the topics yet
+# receive NO data -- and a hard `docker rm -f` leaks SHM segments onto the host.
+# UDP localhost (ROS_LOCALHOST_ONLY=1) is robust for these tiny messages and
+# never leaks. The profile path is inside the mounted workspace.
 docker run -d --name "$NAME" --restart unless-stopped \
     --network host \
     -e ROS_DOMAIN_ID=0 -e ROS_LOCALHOST_ONLY=1 \
+    -e FASTRTPS_DEFAULT_PROFILES_FILE=/home/cosma_auv/swarm-vehicle/gopro_scripts/fastdds_udp_only.xml \
     -v "$WS":/home/cosma_auv/swarm-vehicle \
     --entrypoint bash "$IMAGE" -lc '
         source /opt/ros/humble/setup.bash &&

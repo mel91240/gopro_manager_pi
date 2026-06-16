@@ -14,10 +14,12 @@ if ! docker ps --format '{{.Names}}' | grep -qx gopro_manager; then
     exit 1
 fi
 
-# No --ipc host (matches manager_up.sh): private /dev/shm, DDS over UDP
-# localhost. Avoids leaking FastDDS shared-memory segments onto the host.
+# DDS over UDP localhost (matches manager_up.sh): the UDP-only profile is what
+# actually lets a fresh menu container receive the manager's /system (cross-
+# container shared-memory delivers nothing); no --ipc host so nothing leaks.
 docker run --rm -it --network host \
     -e ROS_DOMAIN_ID=0 -e ROS_LOCALHOST_ONLY=1 \
+    -e FASTRTPS_DEFAULT_PROFILES_FILE=/home/cosma_auv/swarm-vehicle/gopro_scripts/fastdds_udp_only.xml \
     -v "$WS":/home/cosma_auv/swarm-vehicle \
     --entrypoint bash "$IMAGE" -lc '
         source /opt/ros/humble/setup.bash &&
