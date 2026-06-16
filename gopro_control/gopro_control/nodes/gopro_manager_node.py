@@ -45,10 +45,10 @@ class GoProManagerNode(Node):
 
         # --- Parameters --------------------------------------------------
         self.declare_parameter('camera_labels', ['LEFT', 'RIGHT'])   # assigned in discovery order
-        self.declare_parameter('tick_period', 2.0)                   # status publish + watchdog period [s]
+        self.declare_parameter('tick_period', 1.0)                   # status publish + watchdog period [s]
         self.declare_parameter('strikes_before_restart', 2)          # consecutive bad checks before acting
         self.declare_parameter('record_grace_period', 10.0)          # [s] after start: encoder init, watchdog waits
-        self.declare_parameter('restart_cooldown', 8.0)              # [s] between recovery attempts of a camera
+        self.declare_parameter('restart_cooldown', 0.0)              # [s] between recovery attempts (0 = every tick)
         self.declare_parameter('fault_after', 30.0)                  # [s] a cam lost this long -> mission compromised
         self.declare_parameter('discovery_timeout', 20.0)            # [s] wait for all cams to enumerate at boot
         self.declare_parameter('resume_on_restart', True)            # auto-resume recording after a reboot
@@ -425,10 +425,21 @@ class GoProManagerNode(Node):
 
         n = len(self.cameras)
         now = time.monotonic()
+        # Recording, but NOTHING is being filmed (every camera dropped at once)?
+        # Immediate emergency -- don't wait fault_after: the vehicle must hold
+        # position because we are no longer capturing. Auto-clears the instant
+        # any camera resumes. Suppressed during the post-start grace window,
+        # where the encoder is still spinning up and reads as "not recording".
+        all_lost = (self.recording and n > 0 and recording_now == 0
+                    and now >= max(self._grace_until.get(c.label, 0.0)
+                                   for c in self.cameras))
         if self._faulted:
             self.state = GoProSystem.STATE_FAULT
             reasons = ', '.join(f'{k} ({v})' for k, v in sorted(self._faulted.items()))
             self.message = f'MISSION COMPROMISED -- {reasons}'
+        elif all_lost:
+            self.state = GoProSystem.STATE_FAULT
+            self.message = 'MISSION COMPROMISED -- no camera filming (vehicle should hold)'
         elif self._recovering:
             labels = sorted(self._recovering)
             worst = max(now - t for t in self._recovering.values())

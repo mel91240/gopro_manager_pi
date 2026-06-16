@@ -72,10 +72,11 @@ tests/             # automated ROS-interface test suite
   detects and adopts the recording (no re-arm, no beep).
 - **Watchdog**: a camera that stops/drops → `DEGRADED`, retried in software
   (re-arm + restart, **no power-cycle**). Recovers as soon as it answers again.
-- **EMERGENCY signal**: unrecoverable past `fault_after` (or SD unusable) →
-  state `FAULT` = the emergency signal the autonomy layer consumes
-  (`state == GoProSystem.STATE_FAULT`) to surface the AUV. Keeps retrying, so it
-  self-clears if the camera returns.
+- **EMERGENCY signal**: a single camera unrecoverable past `fault_after` (or SD
+  unusable), **or all cameras dropping at once** (nothing is being filmed →
+  immediate, no wait) → state `FAULT` = the emergency signal the autonomy layer
+  consumes (`state == GoProSystem.STATE_FAULT`) to hold the vehicle / surface the
+  AUV. Keeps retrying, so it self-clears the instant a camera returns.
 - **Auto-resume after reboot**: a persistent intent flag means an involuntary
   reboot that interrupted a mission **resumes recording on its own** (a new,
   timestamped segment).
@@ -87,7 +88,7 @@ tests/             # automated ROS-interface test suite
 
 **Safety (SD card)**
 - Vbus is cut **only** on a camera **confirmed off the bus** for several
-  consecutive scans (~15 s) — never a visible camera (it might be recording),
+  consecutive scans (~6 s) — never a visible camera (it might be recording),
   never on a 1 s blip. A camera off the bus is idle, so its SD can't be corrupted.
 - Cameras are tracked **by hub port**, not serial — a flooded camera swapped for
   a fresh one in the same socket works with no code change.
@@ -140,8 +141,8 @@ Node `gopro_manager` (private namespace):
 `FAULT` is the **emergency** signal for the autonomy layer.
 
 ### Parameters (`params/gopro_params.yaml`)
-`camera_labels`, `tick_period` (2 s), `strikes_before_restart` (2),
-`record_grace_period` (10 s), `restart_cooldown` (8 s), `fault_after` (30 s),
+`camera_labels`, `tick_period` (1 s), `strikes_before_restart` (2),
+`record_grace_period` (10 s), `restart_cooldown` (0 s), `fault_after` (30 s),
 `discovery_timeout` (20 s), `resume_on_restart` (true), `state_file`.
 
 ---

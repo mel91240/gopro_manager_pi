@@ -22,7 +22,7 @@ REF="$(cd "$(dirname "$0")" && pwd)/.gopro_ref"     # lines: "hub:port" (expecte
 UHUBCTL=/usr/sbin/uhubctl
 EXPECTED=${GOPRO_COUNT:-2}    # number of GoPro sockets on the rig
 CONFIRM=3                     # consecutive scans a port must be empty before we act
-SCAN=5                        # [s] between scans
+SCAN=2                        # [s] between scans  (CONFIRM*SCAN = confirmation window)
 
 declare -A PORT_TAKEN         # hub:port -> 1  (a GoPro is enumerated there right now)
 
@@ -94,4 +94,4 @@ for hp in "${miss1[@]}"; do
         echo "  $hp revenu entre-temps -> on NE touche pas."
     fi
 done
-echo ">>> attends ~22s ; le manager ré-arme la cam tout seul (re-scan)."
+echo ">>> attends ~10s ; le manager ré-arme la cam tout seul (re-scan)."
