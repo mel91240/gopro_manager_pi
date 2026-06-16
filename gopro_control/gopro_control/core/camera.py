@@ -322,8 +322,13 @@ def discover(labels: list[str] | None = None) -> list[GoPro]:
         cam_ip = re.sub(r"\.\d+$", ".51", host_ip)
         hub, port = _usb_hub_port(iface)
         cams.append(GoPro(label="", ip=cam_ip, hub=hub, port=port, iface=iface))
-    # stable ordering by camera IP, then label
-    cams.sort(key=lambda c: c.ip)
+    # Order by physical USB slot (hub, then port), so labels map to a socket and
+    # stay put when a camera is swapped for another in the same socket. Cameras
+    # without a resolvable slot fall back to IP order (sorted last).
+    def _slot_key(c):
+        p = int(c.port) if c.port and str(c.port).isdigit() else 0
+        return (0, c.hub, p) if c.hub else (1, c.ip, 0)
+    cams.sort(key=_slot_key)
     for i, cam in enumerate(cams):
         cam.label = labels[i] if labels and i < len(labels) else f"CAM{i}"
     return cams

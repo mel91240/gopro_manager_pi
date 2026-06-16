@@ -77,6 +77,7 @@ class GoProManagerNode(Node):
         self._recover_attempts = {} # label -> recovery cycles tried (0 = drop seen, not retried yet)
         self._faulted = {}          # label -> reason (hard fault: reachable but SD unusable)
         self._ready = set()         # labels armed and verified
+        self._label_by_slot = {}    # (hub,port) -> label: a socket keeps its label across swaps
         self._started = False       # discovery+arm done
         self._first_seen = None     # monotonic time the first camera enumerated
 
@@ -101,7 +102,7 @@ class GoProManagerNode(Node):
         present (so one missing camera doesn't block the others forever)."""
         if self._started:
             return
-        cams = discover(labels=self.labels)
+        cams = self._discover()
         if len(cams) != len(self.cameras):
             self._set_cameras(cams)
             if cams:
@@ -119,46 +120,98 @@ class GoProManagerNode(Node):
         self._started = True
         self._arm_all()
 
+    def _discover(self):
+        """Discover cameras on the bus, each labelled by its USB socket."""
+        return self._relabel(discover(labels=self.labels))
+
+    def _relabel(self, cams):
+        """Give each camera the label tied to its USB socket (hub/port), so a
+        socket keeps its label (LEFT/RIGHT) across camera swaps -- even when the
+        other socket is momentarily empty. A camera in a never-seen socket takes
+        the next free configured label. Cameras with no resolvable socket keep
+        discover()'s order-based label."""
+        used = set(self._label_by_slot.values())
+        for cam in cams:
+            if not cam.hub or not cam.port:
+                continue                            # no ppps socket -> keep order label
+            slot = (cam.hub, cam.port)
+            if slot not in self._label_by_slot:
+                free = [l for l in self.labels if l not in used]
+                self._label_by_slot[slot] = free[0] if free else cam.label
+                used.add(self._label_by_slot[slot])
+            cam.label = self._label_by_slot[slot]
+        return cams
+
+    def _track(self, cam):
+        """Start per-camera bookkeeping with safe defaults."""
+        self._strikes.setdefault(cam.label, 0)
+        self._grace_until.setdefault(cam.label, 0.0)
+        self._cooldown_until.setdefault(cam.label, 0.0)
+
+    def _forget(self, cam):
+        """Drop every trace of a camera whose socket left the bus."""
+        self._ready.discard(cam.label)
+        for d in (self._strikes, self._grace_until, self._cooldown_until,
+                  self._recovering, self._recover_attempts, self._faulted):
+            d.pop(cam.label, None)
+
     def _set_cameras(self, cams):
         """Adopt a (re)discovered camera list, keeping per-camera bookkeeping."""
         self.cameras = cams
         for c in cams:
-            self._strikes.setdefault(c.label, 0)
-            self._grace_until.setdefault(c.label, 0.0)
-            self._cooldown_until.setdefault(c.label, 0.0)
+            self._track(c)
 
     def _rescan(self):
-        """After startup, keep watching the bus (software only -- no Vbus):
-          - pick up a camera that (re)appears, e.g. after the host auto-revive
-            power-cycles a camera that was off the bus;
-          - when idle, re-arm any reachable camera that is not yet ready, so the
-            system returns to READY on its own once a camera is back.
-        During a recording the watchdog already re-arms/restarts dropped cameras."""
+        """Keep the camera set in sync with the bus (software only -- no Vbus).
+        Idle: reconcile to exactly what is present, keyed by USB socket -- arm a
+        camera that (re)appeared or was *swapped in*, and forget a socket that
+        was unplugged, so changing cameras never leaves a ghost that blocks READY
+        (no manual restart needed). Recording: only ADD a (re)appeared camera,
+        never forget one -- a missing camera is being recovered, not gone."""
         if not self._started:
             return
-        known_ips = {c.ip for c in self.cameras}
-        for cam in discover(labels=self.labels):
-            if cam.ip not in known_ips:
-                self.cameras.append(cam)
-                self._strikes.setdefault(cam.label, 0)
-                self._grace_until.setdefault(cam.label, 0.0)
-                self._cooldown_until.setdefault(cam.label, 0.0)
-                self.get_logger().info(f'Camera appeared on the bus: {cam!r}')
-        if not self.recording:
-            now = time.monotonic()
-            for cam in self.cameras:
-                up = cam.reachable(timeout=1)
-                if cam.label in self._ready:
-                    if not up:                      # a ready camera fell off the bus
-                        self._ready.discard(cam.label)
-                        self.get_logger().warn(f'[{cam.label}] dropped off the bus -- will re-arm when back.')
-                        self._publish(self._snapshot())
-                    continue
-                if not up or now < self._cooldown_until.get(cam.label, 0.0):
-                    continue                        # still off the bus -- wait for the revive
-                self._cooldown_until[cam.label] = now + self.restart_cooldown
-                if self._arm(cam):                  # came back -> re-arm to READY
-                    self._publish(self._snapshot())
+        found = self._discover()
+
+        if self.recording:
+            known = {c.ip for c in self.cameras}
+            for cam in found:
+                if cam.ip not in known:
+                    self.cameras.append(cam)
+                    self._track(cam)
+                    self.get_logger().info(f'Camera appeared on the bus: {cam!r}')
+            return
+
+        # --- idle: reconcile to exactly what is on the bus (label == socket) ---
+        dirty = False
+        present = {c.label for c in found}
+        for cam in self.cameras:                    # forget sockets that left
+            if cam.label not in present:
+                self.get_logger().info(f'[{cam.label}] left the bus ({cam.ip}) -- forgetting it.')
+                self._forget(cam)
+                dirty = True
+        old_ip = {c.label: c.ip for c in self.cameras}
+        self.cameras = found
+        now = time.monotonic()
+        for cam in self.cameras:
+            self._track(cam)
+            if old_ip.get(cam.label) != cam.ip:     # new socket or a swapped-in unit
+                self._ready.discard(cam.label)
+                self.get_logger().info(f'{cam!r} -- new/swapped camera, arming.')
+                dirty = True
+            up = cam.reachable(timeout=1)
+            if cam.label in self._ready:
+                if not up:                          # a ready camera fell off the bus
+                    self._ready.discard(cam.label)
+                    self.get_logger().warn(f'[{cam.label}] dropped off the bus -- will re-arm when back.')
+                    dirty = True
+                continue
+            if not up or now < self._cooldown_until.get(cam.label, 0.0):
+                continue                            # off the bus -- wait for the revive
+            self._cooldown_until[cam.label] = now + self.restart_cooldown
+            if self._arm(cam):                      # came back / swapped -> re-arm to READY
+                dirty = True
+        if dirty:
+            self._publish(self._snapshot())
 
     def _arm_all(self):
         if len(self.cameras) < self.expected:
