@@ -1,6 +1,6 @@
 gopro_manager:
   ros__parameters:
-    camera_labels: ["LEFT", "RIGHT"]   # assigned in discovery order (sorted by camera IP)
+    camera_labels: ["RIGHT", "LEFT"]   # labels map to USB sockets in hub/port order (1st label -> 1st socket); order set to match this rig's physical left/right
     tick_period: 1.0                   # [s] status publish + watchdog health-check period
     strikes_before_restart: 2          # consecutive "not recording" checks before a soft restart
     record_grace_period: 10.0          # [s] after start: encoder init time, watchdog stays quiet

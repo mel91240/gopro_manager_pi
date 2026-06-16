@@ -44,7 +44,7 @@ class GoProManagerNode(Node):
         super().__init__('gopro_manager')
 
         # --- Parameters --------------------------------------------------
-        self.declare_parameter('camera_labels', ['LEFT', 'RIGHT'])   # assigned in discovery order
+        self.declare_parameter('camera_labels', ['RIGHT', 'LEFT'])   # 1st label -> 1st USB socket (hub/port order); matches this rig's physical L/R
         self.declare_parameter('tick_period', 1.0)                   # status publish + watchdog period [s]
         self.declare_parameter('strikes_before_restart', 2)          # consecutive bad checks before acting
         self.declare_parameter('record_grace_period', 10.0)          # [s] after start: encoder init, watchdog waits
