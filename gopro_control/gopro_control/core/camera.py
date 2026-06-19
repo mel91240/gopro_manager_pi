@@ -124,6 +124,13 @@ class GoPro:
         time.sleep(1.5)
         return self.set_preset_group(PRESET_GROUP_VIDEO)
 
+    def enable_wired_control(self) -> None:
+        """Re-assert wired USB control without touching the preset/settings. A
+        camera silently falls back to MTP mode after sitting idle or re-enumerating,
+        which makes shutter/start return HTTP 500 -> a spurious 'FAILED to start';
+        calling this right before a (re)start avoids it. Lighter than init()."""
+        self._request("/gopro/camera/control/wired_usb?p=1", timeout=4)
+
     def set_preset_group(self, group_id: int) -> bool:
         """Select a preset group (1000=Video, 1001=Photo, 1002=Timelapse)."""
         code, _ = self._request(

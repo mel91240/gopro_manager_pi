@@ -44,7 +44,7 @@ class GoProManagerNode(Node):
         super().__init__('gopro_manager')
 
         # --- Parameters --------------------------------------------------
-        self.declare_parameter('camera_labels', ['RIGHT', 'LEFT'])   # 1st label -> 1st USB socket (hub/port order); matches this rig's physical L/R
+        self.declare_parameter('camera_labels', ['LEFT', 'RIGHT'])   # 1st label -> 1st USB socket by (hub,port) order: port2(.185)=LEFT, port4(.575)=RIGHT
         self.declare_parameter('tick_period', 1.0)                   # status publish + watchdog period [s]
         self.declare_parameter('strikes_before_restart', 2)          # consecutive bad checks before acting
         self.declare_parameter('record_grace_period', 10.0)          # [s] after start: encoder init, watchdog waits
@@ -52,6 +52,10 @@ class GoProManagerNode(Node):
         self.declare_parameter('fault_after', 30.0)                  # [s] a cam lost this long -> mission compromised
         self.declare_parameter('discovery_timeout', 20.0)            # [s] wait for all cams to enumerate at boot
         self.declare_parameter('resume_on_restart', True)            # auto-resume recording after a reboot
+        self.declare_parameter('vbus_recover_after', 3)              # failed soft re-arms before asking the host watcher for a Vbus cycle
+        self.declare_parameter('vbus_cooldown', 45.0)                # [s] min between Vbus requests for one camera (cycle+reboot+re-arm)
+        self.declare_parameter(                                      # host watcher (revive.sh) polls this for a targeted Vbus cycle
+            'vbus_request_file', '/home/cosma_auv/swarm-vehicle/gopro_scripts/.revive_request')
         self.declare_parameter(                                      # persists the "was recording" intent
             'state_file', '/home/cosma_auv/swarm-vehicle/gopro_scripts/.recording_intent')
 
@@ -64,6 +68,9 @@ class GoProManagerNode(Node):
         self.discovery_timeout = float(self.get_parameter('discovery_timeout').value)
         self.resume_on_restart = bool(self.get_parameter('resume_on_restart').value)
         self.state_file = str(self.get_parameter('state_file').value)
+        self.vbus_recover_after = int(self.get_parameter('vbus_recover_after').value)
+        self.vbus_cooldown = float(self.get_parameter('vbus_cooldown').value)
+        self.vbus_request_file = str(self.get_parameter('vbus_request_file').value)
 
         # --- State -------------------------------------------------------
         self.cameras = []
@@ -76,6 +83,7 @@ class GoProManagerNode(Node):
         self._recovering = {}       # label -> monotonic time it dropped (soft, being retried)
         self._recover_attempts = {} # label -> recovery cycles tried (0 = drop seen, not retried yet)
         self._faulted = {}          # label -> reason (hard fault: reachable but SD unusable)
+        self._vbus_cooldown_until = {}  # label -> monotonic time before the next host Vbus request is allowed
         self._ready = set()         # labels armed and verified
         self._label_by_slot = {}    # (hub,port) -> label: a socket keeps its label across swaps
         self._started = False       # discovery+arm done
@@ -162,7 +170,8 @@ class GoProManagerNode(Node):
         """Drop every trace of a camera whose socket left the bus."""
         self._ready.discard(cam.label)
         for d in (self._strikes, self._grace_until, self._cooldown_until,
-                  self._recovering, self._recover_attempts, self._faulted):
+                  self._recovering, self._recover_attempts, self._faulted,
+                  self._vbus_cooldown_until):
             d.pop(cam.label, None)
 
     def _set_cameras(self, cams):
@@ -273,7 +282,9 @@ class GoProManagerNode(Node):
         ready_cams = [c for c in self.cameras if c.label in self._ready]
         if not ready_cams:
             return
-        time.sleep(1.5)                            # let cameras settle after the arm shutter-test,
+        for cam in ready_cams:                     # re-assert wired control (cams revert to MTP) before shutter
+            cam.enable_wired_control()
+        time.sleep(1.5)                            # let cameras leave MTP / settle before the restart,
         #                                            otherwise some reject the immediate restart
         sync_datetime(ready_cams)                  # same UTC second (barrier)
         results = set_recording(ready_cams, True)
@@ -303,6 +314,17 @@ class GoProManagerNode(Node):
             return True
         ok = cam.init()
         cam.set_datetime()
+        # A full/missing/unformatted SD makes the shutter test below FAIL and BEEP
+        # on every re-arm cycle. Detect an unusable card explicitly and fault it
+        # QUIETLY (no shutter test, no beep loop). Only when the camera actually
+        # answers: a failed state read returns None and must NOT fault a good cam.
+        st = cam.state()
+        if st is not None and not cam._sd_usable(st):
+            self._faulted[cam.label] = 'SD missing/full/unformatted'
+            self._ready.discard(cam.label)
+            self.get_logger().error(
+                f'[{cam.label}] SD unusable (full/missing/unformatted) -> cannot record. Empty the cards ([3]).')
+            return False
         # Honest readiness test: a real (brief) shutter start/stop. This actually
         # proves the camera can record -- a weaker SD-only check would call a
         # camera ready when its first real recording would fail. (A marginal
@@ -325,13 +347,24 @@ class GoProManagerNode(Node):
         """std_srvs/SetBool: data=true starts recording on all cameras, false stops."""
         n = len(self.cameras)
         if request.data:
+            # Report a hard fault (e.g. SD full/unusable) FIRST and by name: in that
+            # state self.recording is still True, so the generic "already recording"
+            # guard would otherwise hide the real reason the operator cannot start.
+            if self._faulted:
+                details = '; '.join(f'{lbl} ({why})' for lbl, why in sorted(self._faulted.items()))
+                return self._reply(response, False,
+                    f'Cannot record -- {details}. Empty the cards ([3]) or swap the SD, then retry.')
             if self.recording:
                 return self._reply(response, False, 'Already recording. Stop first ([2]) before starting again.')
             if not self.cameras:
                 return self._reply(response, False, 'No camera connected.')
-            if self._faulted:
-                return self._reply(response, False, f'Camera(s) faulted: {sorted(self._faulted)}. Cannot start.')
 
+            # Cameras silently fall back to MTP mode after sitting idle or
+            # re-enumerating, which makes shutter/start return HTTP 500. Re-assert
+            # wired control just before starting so [1] doesn't spuriously fail.
+            for cam in self.cameras:
+                cam.enable_wired_control()
+            time.sleep(1.0)                     # let them leave MTP before the synchronized start
             sync_datetime(self.cameras)         # same UTC second on all cams (barrier)
             results = set_recording(self.cameras, True)
             started = [lbl for lbl, ok in results.items() if ok]
@@ -383,16 +416,25 @@ class GoProManagerNode(Node):
         if err:
             return self._reply(response, False, f'Rejected: {err}.')
 
-        details, all_ok = [], True
+        details, oks = [], []
         for cam in self.cameras:
             ok, detail = gp_settings.apply_settings(
                 cam, camera_mode=request.camera_mode, resolution=request.resolution,
                 fps=request.fps, fov=request.fov, hypersmooth=request.hypersmooth,
                 wind_reduction=request.wind_reduction)
-            all_ok = all_ok and ok
-            if not ok:
+            if ok:
+                oks.append(cam.label)
+            else:
                 details.append(f'{cam.label}: {detail}')
-        msg = 'Settings applied on all cameras.' if all_ok else '; '.join(details)
+        present = {c.label for c in self.cameras}
+        for lbl in self.labels:                       # expected sockets with no camera present
+            if lbl not in present:
+                details.append(f'{lbl}: absent (not applied)')
+        all_ok = (not details) and (len(oks) == self.expected)
+        if all_ok:
+            msg = f'Settings applied on all {self.expected} cameras.'
+        else:
+            msg = (f'applied on {", ".join(oks)}; ' if oks else '') + '; '.join(details)
         return self._reply(response, all_ok, msg)
 
     def _reply(self, response, success, message):
@@ -467,8 +509,22 @@ class GoProManagerNode(Node):
             self._mark_healthy(cam)
             return
         if not cam.sd_present():
+            # A full/unusable SD is TERMINAL, not a transient drop: the vehicle has
+            # to surface. Stop ALL cameras cleanly (so the others finalise their
+            # files, exactly like an operator [2]) and drop the recording intent so
+            # nothing auto-resumes when the card is later cleared. The FAULT state
+            # stays raised (via _faulted) so autonomy still sees MISSION COMPROMISED;
+            # once the card is emptied the re-arm clears the fault -> READY, and the
+            # operator restarts manually with [1].
             self._faulted[cam.label] = 'SD missing/full/unformatted'
-            self.get_logger().error(f'[{cam.label}] reachable but SD unusable -> cannot record.')
+            self.get_logger().error(
+                f'[{cam.label}] SD full/unusable -> mission ended (clean stop on all cameras). '
+                f'Empty the card, then restart with [1].')
+            set_recording(self.cameras, False)
+            self.recording = False
+            self._set_intent(False)
+            self._recovering.clear()
+            self._recover_attempts.clear()
             return
         self.get_logger().warn(f'[{cam.label}] reachable again -- re-arming and restarting recording...')
         cam.init()
@@ -476,6 +532,32 @@ class GoProManagerNode(Node):
         cam.start()
         if cam.encoding():
             self._mark_healthy(cam)
+            return
+        # Reachable + SD ok but STILL won't record after a soft re-arm = the
+        # "NOT ENOUGH POWER" brown-out zombie (answers /state 200 but /shutter 500).
+        # Soft recovery cannot fix this -- only a real power cycle does. The manager
+        # has no Vbus (no uhubctl in the container), so it asks the host watcher
+        # (revive.sh) to Vbus-cycle THIS camera's socket. Safe: the camera is not
+        # recording (enc=0 -> SD idle) and only its own socket is cycled, so a
+        # camera filming on another port is never touched.
+        if (cam.can_power_cycle()
+                and self._recover_attempts.get(cam.label, 0) >= self.vbus_recover_after
+                and now >= self._vbus_cooldown_until.get(cam.label, 0.0)):
+            self._request_vbus_cycle(cam, now)
+
+    def _request_vbus_cycle(self, cam, now):
+        """Ask the host watcher (revive.sh) to Vbus power-cycle this camera's
+        socket -- the only fix for a reachable-but-capture-dead (brown-out) cam.
+        Written to a file the host watcher polls; the manager has no Vbus itself."""
+        self._vbus_cooldown_until[cam.label] = now + self.vbus_cooldown
+        try:
+            with open(self.vbus_request_file, 'w') as f:
+                f.write(f'{cam.hub}:{cam.port}\n')
+            self.get_logger().warn(
+                f'[{cam.label}] capture-dead (brown-out) -> requested host Vbus '
+                f'power-cycle of socket {cam.hub}:{cam.port}.')
+        except OSError as e:
+            self.get_logger().error(f'[{cam.label}] could not write Vbus request: {e}')
 
     # =====================================================================
     # Snapshot + publish
@@ -485,12 +567,24 @@ class GoProManagerNode(Node):
 
     def _publish(self, snapshot):
         recording_now = 0
+        sd_parts = []
         for cam, h in snapshot:
             recording_now += 1 if h['recording'] else 0
+            sec = h['remaining_sec']
+            if not h['reachable'] or sec is None:
+                rem = '--'
+            elif sec >= 3600:
+                rem = f"{sec // 3600}h{(sec % 3600) // 60:02d}"
+            elif sec >= 60:
+                rem = f"{sec // 60}min"
+            else:
+                rem = f"{sec}s"
+            sd_parts.append(f"{h['label']} {rem}")
             self.status_pub.publish(GoProStatus(
                 label=h['label'], ip=h['ip'], reachable=h['reachable'],
                 recording=h['recording'], sd_ok=h['sd_ok'],
                 can_power_cycle=h['can_power_cycle']))
+        sd_info = ' . '.join(sd_parts)
 
         n = len(self.cameras)
         now = time.monotonic()
@@ -512,13 +606,13 @@ class GoProManagerNode(Node):
         elif self._recovering:
             labels = sorted(self._recovering)
             worst = max(now - t for t in self._recovering.values())
-            # DEGRADED = a camera just dropped and its FIRST recovery attempt is
+            # DEGRADED = a camera just dropped and its first recovery attempts are
             # still in flight -> the AUV may slow down. It escalates to FAULT (the
-            # AUV should stop) as soon as that first attempt has FAILED, while we
-            # keep retrying. Backstop: FAULT anyway if a camera has been lost past
-            # fault_after (e.g. a slow self-repair that never reached a retry).
+            # AUV should stop) once a SECOND attempt has failed (one failed retry is
+            # often just a transient re-enumeration), while we keep retrying.
+            # Backstop: FAULT anyway if a camera has been lost past fault_after.
             # FAULT self-clears the instant the camera records again.
-            failed = any(self._recover_attempts.get(l, 0) >= 1 for l in self._recovering)
+            failed = any(self._recover_attempts.get(l, 0) >= 2 for l in self._recovering)
             if failed or worst >= self.fault_after:
                 self.state = GoProSystem.STATE_FAULT
                 why = 'recovery failed' if failed else f'lost {int(worst)}s'
@@ -537,7 +631,7 @@ class GoProManagerNode(Node):
         self.system_pub.publish(GoProSystem(
             state=self.state, message=self.message, recording=self.recording,
             all_ready=(n > 0 and len(self._ready) == n),
-            num_cameras=n, num_recording=recording_now))
+            num_cameras=n, num_recording=recording_now, sd_info=sd_info))
 
 
 def main(args=None):

@@ -8,6 +8,7 @@ over ROS 2 services and reads its published GoProSystem state.
     ros2 run gopro_control pi_menu
 """
 import select
+import shutil
 import sys
 import termios
 import threading
@@ -69,14 +70,44 @@ def _status_line(s) -> str:
     return s.state          # INITIALIZING
 
 
+def _menu_body(node):
+    s = node.system
+    cards = s.sd_info if (s is not None and s.sd_info) else '--'
+    return [
+        '=== GoPro Recording ===',
+        f'Status: {_status_line(s)}',
+        f'Cards:  {cards}',
+        '  [1] Start recording',
+        '  [2] Stop recording',
+        '  [3] Change settings',
+        '  [0] Exit',
+    ]
+
+
 def _print_menu(node):
-    print('\n=== AUV GoPro Master Control ===')
-    print('Status:', _status_line(node.system))
-    print('  [1] Start recording')
-    print('  [2] Stop recording')
-    print('  [3] Change settings')
-    print('  [0] Exit')
-    print('Command: ', end='', flush=True)
+    """Full draw of the menu. Each line is cut to the terminal width so it never
+    wraps (which would break the in-place status refresh)."""
+    width = shutil.get_terminal_size((80, 24)).columns
+    body = [ln[:width - 1] for ln in _menu_body(node)]
+    sys.stdout.write('\n' + '\n'.join(body) + '\nCommand: ')
+    sys.stdout.flush()
+
+
+def _refresh_status(node):
+    """Update ONLY the Status and Cards lines, in place, WITHOUT touching the
+    'Command:' input line: the cursor is saved and restored, so whatever the
+    operator has already typed stays visible and intact. Runs every ~1s while idle
+    at the prompt. Body order is header, Status, Cards, [1], [2], [3], [0] -> from
+    the prompt the Status line is 6 up and Cards 5 up."""
+    if not sys.stdout.isatty():
+        return
+    width = shutil.get_terminal_size((80, 24)).columns
+    body = [ln[:width - 1] for ln in _menu_body(node)]
+    sys.stdout.write('\033[s'                        # save cursor (at the prompt)
+                     + '\033[6A\r\033[2K' + body[1]  # up to Status, clear line, rewrite
+                     + '\033[1B\r\033[2K' + body[2]  # down to Cards, clear line, rewrite
+                     + '\033[u')                     # restore cursor (back to the prompt)
+    sys.stdout.flush()
 
 
 def _flush_input():
@@ -91,11 +122,11 @@ def _flush_input():
         pass
 
 
-def _await_command(node, refresh=3.0):
-    """Wait for a command, but refresh the screen live if the manager's status
-    changes (a camera dropping out, recovery, EMERGENCY) so the operator sees it
-    immediately -- not only after pressing a key. Critical just before diving."""
-    last = _status_line(node.system)
+def _await_command(node, refresh=1.0):
+    """Wait for a command. While idle at the prompt, refresh the live Status / SD
+    line every ~1s WITHOUT disturbing what the operator has typed. Entering a
+    DEGRADED/FAULT state also rings the terminal bell -- critical just before diving."""
+    last_state = node.system.state if node.system else None
     while True:
         ready, _, _ = select.select([sys.stdin], [], [], refresh)
         if ready:
@@ -103,13 +134,12 @@ def _await_command(node, refresh=3.0):
             if line == '':                       # EOF
                 raise EOFError
             return line.strip()
-        cur = _status_line(node.system)
-        if cur != last:                          # state changed while idle -> redraw
-            last = cur
-            alert = node.system is not None and node.system.state in (
-                GoProSystem.STATE_DEGRADED, GoProSystem.STATE_FAULT)
-            print(('\a\n' if alert else '\n') + f'  >> status changed: {cur}')
-            _print_menu(node)
+        cur_state = node.system.state if node.system else None
+        if (cur_state != last_state and node.system is not None
+                and node.system.state in (GoProSystem.STATE_DEGRADED, GoProSystem.STATE_FAULT)):
+            sys.stdout.write('\a')               # bell on entering a degraded/fault state
+        last_state = cur_state
+        _refresh_status(node)
 
 
 def _choose(prompt, options, default):
@@ -172,7 +202,11 @@ def main(args=None):
             choice = _await_command(node)
 
             if choice == '1':
-                if node.system and node.system.recording:
+                # Block a double-start only when genuinely recording. In FAULT
+                # (recording=true is just the unfulfilled intent) let the call go
+                # through so the manager replies with the real reason (e.g. SD full).
+                if (node.system and node.system.recording
+                        and node.system.state != GoProSystem.STATE_FAULT):
                     print('Already recording (stop with [2] before starting again).')
                     continue
                 if node.system and not node.system.all_ready:
@@ -197,7 +231,7 @@ def main(args=None):
             elif choice == '':
                 continue            # bare Enter / stray newline -> just redraw, not an error
             else:
-                print('Unknown command.')
+                print(f"Unknown command: {choice!r} -- nothing launched. Use 1/2/3/0.")
 
             if choice in ('1', '2', '3'):
                 time.sleep(0.4)   # let the fresh system state arrive before redisplaying

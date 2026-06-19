@@ -12,3 +12,4 @@ bool recording
 bool all_ready
 uint8 num_cameras
 uint8 num_recording
+string sd_info            # per-camera SD time left, human-readable (e.g. "LEFT 42min . RIGHT 38min")

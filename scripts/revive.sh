@@ -23,6 +23,8 @@ UHUBCTL=/usr/sbin/uhubctl
 EXPECTED=${GOPRO_COUNT:-2}    # number of GoPro sockets on the rig
 CONFIRM=3                     # consecutive scans a port must be empty before we act
 SCAN=2                        # [s] between scans  (CONFIRM*SCAN = confirmation window)
+REQ="$(cd "$(dirname "$0")" && pwd)/.revive_request"   # manager writes "hub:port" here for a targeted Vbus cycle (on-bus capture-dead cam)
+REQ_OFF=15                    # [s] Vbus OFF for a requested cycle (a capture-dead/black-but-lit cam needs a long cut, not the 4s of an off-bus blip)
 
 declare -A PORT_TAKEN         # hub:port -> 1  (a GoPro is enumerated there right now)
 
@@ -57,11 +59,29 @@ missing_ports() {
 }
 
 cycle_port() { local h=${1%:*} p=${1#*:}; sudo -n "$UHUBCTL" -l "$h" -p "$p" -a cycle -d 4 >/dev/null 2>&1; }
+cycle_port_long() { local h=${1%:*} p=${1#*:}; sudo -n "$UHUBCTL" -l "$h" -p "$p" -a cycle -d "$REQ_OFF" >/dev/null 2>&1; }
+
+# The manager (no uhubctl in its container) drops a "hub:port" into $REQ to ask us to
+# Vbus-cycle a camera that is ON the bus but capture-dead (brown-out: /state 200 but
+# /shutter 500). We cut ONLY that socket, with a LONG cut (a short blip won't reset
+# it); a camera filming on another port is never touched. revive's normal off-bus
+# logic does not catch this case (the dead camera is still enumerated).
+handle_request() {
+    [[ -s $REQ ]] || return 0
+    local target; target=$(head -n1 "$REQ" | tr -d '[:space:]')
+    : > "$REQ"                                   # consume immediately: one cycle per request
+    if [[ ! $target =~ ^[^:]+:[0-9]+$ ]]; then
+        echo "[autorevive] bad Vbus request '$target' -- ignored"; return 0
+    fi
+    echo "[autorevive] manager requested Vbus power-cycle of $target (on-bus capture-dead) -> cutting ${REQ_OFF}s"
+    cycle_port_long "$target"
+}
 
 if [[ "${1:-}" == "--watch" ]]; then
     echo "[autorevive] watching (power-cycle ONLY a socket confirmed empty for ~$((CONFIRM*SCAN))s; never a visible camera)"
     declare -A MISS
     while true; do
+        handle_request
         mapfile -t missing < <(missing_ports)
         declare -A seen=()
         for hp in "${missing[@]:-}"; do
