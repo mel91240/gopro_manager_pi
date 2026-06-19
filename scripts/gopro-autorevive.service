@@ -7,7 +7,7 @@ Wants=docker.service
 Type=simple
 User=pi
 # absolute path -- adjust if the repo lives elsewhere on the Pi
-ExecStart=/home/pi/dev/swarm-vehicle/gopro_scripts/revive.sh --watch
+ExecStart=/usr/bin/stdbuf -oL /home/pi/dev/swarm-vehicle/gopro_scripts/revive.sh --watch
 Restart=always
 RestartSec=5
 

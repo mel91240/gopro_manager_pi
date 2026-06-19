@@ -58,7 +58,7 @@ missing_ports() {
     done < "$REF"
 }
 
-cycle_port() { local h=${1%:*} p=${1#*:}; sudo -n "$UHUBCTL" -l "$h" -p "$p" -a cycle -d 4 >/dev/null 2>&1; }
+cycle_port() { local h=${1%:*} p=${1#*:}; sudo -n "$UHUBCTL" -l "$h" -p "$p" -a cycle -d 8 >/dev/null 2>&1; }
 cycle_port_long() { local h=${1%:*} p=${1#*:}; sudo -n "$UHUBCTL" -l "$h" -p "$p" -a cycle -d "$REQ_OFF" >/dev/null 2>&1; }
 
 # The manager (no uhubctl in its container) drops a "hub:port" into $REQ to ask us to
