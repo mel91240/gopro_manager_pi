@@ -98,6 +98,7 @@ class GoProManagerNode(Node):
         self.create_timer(float(self.get_parameter('tick_period').value), self._tick)
         self.create_timer(2.0, self._startup)
         self.create_timer(5.0, self._rescan)
+        self.create_timer(15.0, self._enforce_auto_power_off)   # keep Auto Power Off = Never
 
     # =====================================================================
     # Startup: discover (retry) -> arm + time + verify
@@ -489,6 +490,20 @@ class GoProManagerNode(Node):
         self._faulted.pop(cam.label, None)
         self._recover_attempts.pop(cam.label, None)
         self._strikes[cam.label] = 0
+
+    def _enforce_auto_power_off(self):
+        """Keep Auto Power Off = Never on every present camera (also set at arm).
+        A manual change or a post-power-loss revert must never let an idle camera
+        sleep into a capture-dead state. Skipped while recording (settings cannot
+        change then, and an encoding camera will not sleep anyway)."""
+        if self.recording:
+            return
+        for cam in self.cameras:
+            try:
+                if cam.ensure_auto_power_off_never():
+                    self.get_logger().info(f'[{cam.label}] Auto Power Off drifted -> re-set to Never.')
+            except Exception:
+                pass
 
     def _recover(self, cam, now):
         """Bring a dropped camera back: re-arm (out of USB-connected mode) and

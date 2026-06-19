@@ -192,6 +192,18 @@ class GoPro:
             f"/gopro/camera/setting?setting={setting_id}&option={option}", timeout=4)
         return code == 200
 
+    def ensure_auto_power_off_never(self) -> bool:
+        """Re-assert Auto Power Off = Never if it has drifted (cameras run on USB
+        with no battery, so the setting reverts after a power loss, and an operator
+        may change it). Returns True if a correction was applied. Cheap: it only
+        writes when the camera reports a non-Never value, a no-op on a healthy cam."""
+        code, data = self._request("/gopro/camera/state", timeout=4)
+        if code != 200 or not data:
+            return False
+        if data.get("settings", {}).get(str(AUTO_POWER_OFF)) == AUTO_POWER_OFF_NEVER:
+            return False
+        return self.set_setting(AUTO_POWER_OFF, AUTO_POWER_OFF_NEVER)
+
     def set_datetime(self) -> bool:
         """Set the camera clock to the host's current UTC time.
         tzone=0&dst=0 makes the camera store the given UTC verbatim (otherwise
