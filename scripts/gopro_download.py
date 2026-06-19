@@ -55,6 +55,17 @@ READ_TIMEOUT = 20                    # s; a per-read stall longer than this -> r
 RETRIES = 6                          # attempts per file before giving up
 BACKOFF = 2                          # s; pause after a failure (the camera re-init settles)
 REINIT_MIN_GAP = 3                   # s; don't re-init the same camera more often than this
+_LIMITER = None                      # optional aggregate byte-rate cap (set from --maxrate).
+                                     # USB3 RFI scales with bus activity; capping total throughput
+                                     # keeps the noise under the level that drops the 2.4GHz WiFi.
+SYNC_EVERY = 128 << 20               # BYTES BETWEEN fsyncs -- NOT a rate cap. Throughput stays
+                                     # at full speed (~70 MB/s); this only bounds how many dirty
+                                     # pages pile up. On a Pi 4 writing tens of GB to a USB disk,
+                                     # caching the whole transfer grows dirty pages faster than
+                                     # the disk drains them -> the global dirty throttle freezes
+                                     # ALL userspace (even sshd over ethernet stops answering).
+                                     # Flushing every 128 MB caps that backlog while keeping the
+                                     # fsync overhead negligible. Tune after measuring with btop.
 
 
 # --- camera discovery / HTTP -------------------------------------------------
@@ -169,13 +180,21 @@ def _pull_range(ip, f, end, part, target, progress=None):
                 os.remove(part)
             raise IOError(f"range not honored (HTTP {code}); restarting file")
         with open(part, "ab" if (have and code == 206) else "wb") as o:
+            since_sync = 0
             while True:
                 b = r.read(1 << 20)
                 if not b:
                     break
                 o.write(b)
+                since_sync += len(b)
+                if since_sync >= SYNC_EVERY:       # flush to disk so dirty pages stay bounded
+                    o.flush()
+                    os.fsync(o.fileno())           # -> Pi stays responsive (sshd survives)
+                    since_sync = 0
                 if progress is not None:
                     progress.add(len(b))
+                if _LIMITER is not None:
+                    _LIMITER.throttle(len(b))       # pace total throughput (WiFi-safe rate)
     finally:
         r.close()
 
@@ -218,6 +237,29 @@ def _fmt_eta(sec):
     return f"{s}s"
 
 
+class RateLimiter:
+    """Aggregate byte-rate cap shared across all camera threads. Paces the total
+    transfer to <= max_bytes_per_sec so the USB3 bus activity (and thus its 2.4GHz
+    RFI) stays below the level that knocks the Pi off WiFi. Slowing the copy is the
+    price for keeping the wireless link alive without extra hardware."""
+
+    def __init__(self, max_bytes_per_sec):
+        self.rate = max_bytes_per_sec
+        self.lock = threading.Lock()
+        self.t0 = time.monotonic()
+        self.sent = 0
+
+    def throttle(self, n):
+        if self.rate <= 0:
+            return
+        with self.lock:
+            self.sent += n
+            target = self.t0 + self.sent / self.rate
+        delay = target - time.monotonic()
+        if delay > 0:
+            time.sleep(delay)
+
+
 class Progress:
     """Shared, thread-safe transfer progress for the live status line."""
 
@@ -253,9 +295,25 @@ class Progress:
 
 
 def _reporter(progress):
+    """Redraw the live status line ~3x/s. The bar/%/GB advance with every chunk
+    read, so a stable speed/ETA is normal -- but a genuinely STALLED camera (a
+    drop into "USB Connected" while the retry loop re-inits it) freezes the bytes
+    for up to READ_TIMEOUT seconds. Flag that explicitly so a stall reads as a
+    stall, not as a hang of the tool itself."""
+    last_done = -1
+    last_move = time.monotonic()
     while not progress.stop:
+        with progress.lock:
+            cur = progress.done
+        now = time.monotonic()
+        if cur != last_done:
+            last_done, last_move = cur, now
+        line = progress.render()
+        stalled = now - last_move
+        if stalled > 3:
+            line += f"  [stalled {int(stalled)}s -- recovering camera]"
         with _print_lock:
-            sys.stdout.write("\r\033[K" + progress.render())
+            sys.stdout.write("\r\033[K" + line)
             sys.stdout.flush()
         time.sleep(0.3)
 
@@ -413,8 +471,14 @@ def main():
     ap.add_argument("--all", action="store_true", help="include tiny (<2 MB) test clips")
     ap.add_argument("--minsec", type=int, default=0, help="skip clips shorter than N seconds")
     ap.add_argument("--minsize", type=int, default=None, help="skip clips smaller than N bytes")
+    ap.add_argument("--maxrate", type=float, default=0, help="cap total throughput to N MB/s "
+                    "(0=unlimited; lower it to keep the 2.4GHz WiFi alive during the copy)")
     ap.add_argument("--dest", default=os.environ.get("GOPRO_DEST", os.path.expanduser("~/gopro_footage")))
     args = ap.parse_args()
+
+    global _LIMITER
+    if args.maxrate > 0:
+        _LIMITER = RateLimiter(args.maxrate * 1e6)
 
     minsize = 0 if args.all else (args.minsize if args.minsize is not None else DEFAULT_MINSIZE)
 
@@ -446,6 +510,8 @@ def main():
     mode = "parallel" if parallel else "sequential"
     if not (args.parallel or args.sequential):
         mode += " (auto)"
+    if args.maxrate > 0:
+        mode += f", capped {args.maxrate:g} MB/s"
     print(f">>> downloading {total} clip(s) from {len(jobs)} camera(s) [{mode}] -> {args.dest}")
     t0 = time.time()
     c = download_all(jobs, args.dest, parallel=parallel)

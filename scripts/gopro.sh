@@ -18,47 +18,54 @@ DEST="${GOPRO_DEST:-$SSD_MNT/gopro}"
 
 manager_running() { docker ps --format '{{.Names}}' 2>/dev/null | grep -qx gopro_manager; }
 ssd_mounted()     { mountpoint -q "$SSD_MNT" 2>/dev/null; }
-pause()           { read -rp "  (Entrée pour revenir au menu) " _; }
+pause()           { read -rp "  (Enter to return to menu) " _; }
 
 ensure_dest() {
     # Mount the SSD if needed, then make sure DEST exists AND is writable by us.
     # Done every time (not only on first mount) -- /mnt/ssd is root-owned, so the
     # destination folder must be created+chowned once or python (as pi) can't write.
     if ! ssd_mounted; then
-        echo ">>> montage du SSD ($SSD_DEV -> $SSD_MNT)..."
-        sudo mount "$SSD_DEV" "$SSD_MNT" || { echo "!!! échec du montage du SSD"; return 1; }
+        echo ">>> mounting SSD ($SSD_DEV -> $SSD_MNT)..."
+        sudo mount "$SSD_DEV" "$SSD_MNT" || { echo "!!! SSD mount failed"; return 1; }
     fi
     if [ ! -w "$DEST" ]; then
         sudo mkdir -p "$DEST" && sudo chown "$(id -u):$(id -g)" "$DEST" \
-            || { echo "!!! impossible de préparer $DEST"; return 1; }
+            || { echo "!!! could not prepare $DEST"; return 1; }
     fi
 }
 
 do_download() {
     ensure_dest || { pause; return; }
-    echo ">>> Destination : $DEST"
-    read -rp "  Tout copier [a], choisir [p], ou annuler [q] ? (a/p/q, défaut a) : " m
-    case "${m:-a}" in
-        q|c) echo ">>> annulé."; pause; return ;;
-    esac
+    echo ">>> Destination: $DEST"
+    # No default action: an empty/unknown answer copies NOTHING. Copying every
+    # clip is the slow, full-bus operation -- it must be asked for explicitly
+    # (lowercase or uppercase), never triggered by a stray key or a bare Enter.
     # The manager can stay up (the robust downloader tolerates its state polls)
     # and the auto-revive watcher stays on (it only ever acts on a camera that has
     # FALLEN OFF the bus -- which doesn't happen mid-copy, and if it did a
     # power-cycle is exactly the recovery we want; the download just resumes).
-    if [ "$m" = "p" ]; then
-        GOPRO_DEST="$DEST" python3 "$DIR/gopro_download.py" --pick
-    else
-        GOPRO_DEST="$DEST" python3 "$DIR/gopro_download.py"
-    fi
+    # Run the copy at low CPU priority and slightly lowered IO priority so it
+    # yields to sshd, WITHOUT capping throughput (the copy is IO-bound, not CPU-
+    # bound, so 'nice' costs it almost nothing; 'ionice -c2 -n7' is best-effort-
+    # low, not idle, so it doesn't starve the transfer). The real anti-freeze is
+    # the periodic fsync inside the downloader.
+    read -rp "  Pick clips [p], copy ALL [a], or cancel [q]? (p/a/q): " m
+    local LOW="nice -n 19 ionice -c2 -n7"
+    case "${m,,}" in
+        p)      GOPRO_DEST="$DEST" $LOW python3 "$DIR/gopro_download.py" --pick ;;
+        a)      GOPRO_DEST="$DEST" $LOW python3 "$DIR/gopro_download.py" ;;
+        q|c|"") echo ">>> cancelled (nothing copied)." ;;
+        *)      echo ">>> '$m' not understood -- nothing copied. Use p / a / q." ;;
+    esac
     pause
 }
 
 do_delete() {
-    echo ">>> Suppression média sur les caméras (IRRÉVERSIBLE)"
-    read -rp "  Tout vider [a], choisir [p], ou annuler [q] ? (a/p/q, défaut p) : " m
+    echo ">>> Deleting media on the cameras (IRREVERSIBLE)"
+    read -rp "  Wipe all [a], pick [p], or cancel [q]? (a/p/q, default p): " m
     case "${m:-p}" in
         a)   python3 "$DIR/gopro_delete.py" --all ;;
-        q|c) echo ">>> annulé." ;;
+        q|c) echo ">>> cancelled." ;;
         *)   python3 "$DIR/gopro_delete.py" --pick ;;
     esac
     pause
@@ -70,22 +77,21 @@ toggle_manager() {
 }
 
 while true; do
-    st="DOWN"; manager_running && st="UP"
-    sd="non montée"; ssd_mounted && sd="montée"
-    printf '\n=== AUV GoPro ===  (manager: %s | SSD: %s)\n' "$st" "$sd"
-    echo "  [1] Enregistrement (record / stop / settings)"
-    echo "  [2] Copier les vidéos -> SSD"
-    echo "  [3] Supprimer / vider les cartes"
-    if manager_running; then echo "  [4] Arrêter le manager"; else echo "  [4] Démarrer le manager (armer)"; fi
-    echo "  [0] Quitter"
-    read -rp "Commande : " cmd
+    sd="not mounted"; ssd_mounted && sd="mounted"
+    printf '\n=== AUV GoPro ===  (SSD: %s)\n' "$sd"
+    echo "  [1] Recording (record / stop / settings)"
+    echo "  [2] Copy videos -> SSD"
+    echo "  [3] Delete / wipe cards"
+    if manager_running; then echo "  [4] Stop manager"; else echo "  [4] Start manager (arm)"; fi
+    echo "  [0] Quit"
+    read -rp "Command: " cmd
     case "$cmd" in
-        1) if manager_running; then "$DIR/menu.sh"; else echo "  Démarre d'abord le manager [4]."; fi ;;
+        1) if manager_running; then "$DIR/menu.sh"; else echo "  Start the manager first [4]."; fi ;;
         2) do_download ;;
         3) do_delete ;;
         4) toggle_manager ;;
         0) break ;;
         "") : ;;
-        *) echo "  Commande inconnue." ;;
+        *) echo "  Unknown command." ;;
     esac
 done
