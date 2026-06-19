@@ -42,6 +42,8 @@ ST_REMAINING_SEC = "35"  # remaining video seconds -- the RELIABLE "card usable"
 ST_SPACE_KB = "54"
 
 PRESET_GROUP_VIDEO = 1000
+AUTO_POWER_OFF = 59          # Open GoPro setting id (Hero 12): Auto Power Off
+AUTO_POWER_OFF_NEVER = 0     # option 0 = Never (verified: camera reads setting 59 = 0 when set to "Never")
 MODE_PRESET_GROUP = {"Video": 1000, "Photo": 1001, "Timelapse": 1002}
 
 # Open GoPro wired host IPs look like 172.2X.1YY.5Z ; camera is always .51.
@@ -122,6 +124,12 @@ class GoPro:
         otherwise shutter/start returns HTTP 500 (camera still in MTP mode)."""
         self._request("/gopro/camera/control/wired_usb?p=1", timeout=4)
         time.sleep(1.5)
+        # Disable idle auto-power-off (setting 59 = Never). The cameras run on USB
+        # with NO battery, so this reverts to a few minutes after any power loss;
+        # re-assert it on every arm so an idle camera never sleeps into a
+        # capture-dead state (answers /state 200 but /shutter 500) mid-mission.
+        self.set_setting(AUTO_POWER_OFF, AUTO_POWER_OFF_NEVER)
+        time.sleep(0.3)
         return self.set_preset_group(PRESET_GROUP_VIDEO)
 
     def enable_wired_control(self) -> None:
