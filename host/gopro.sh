@@ -82,6 +82,36 @@ do_delete() {
     pause
 }
 
+do_inspect() {
+    # Show what is actually on the SSD and, optionally, verify against the cameras
+    # that every clip copied in full (size-for-size) -- a manual completeness check.
+    ensure_dest || { pause; return; }
+    echo ">>> SSD content: $DEST"
+    df -h "$SSD_MNT" 2>/dev/null | awk 'NR==1 || NR==2'
+    echo
+    local any=0
+    if [ -d "$DEST" ]; then
+        for d in "$DEST"/*/; do
+            [ -d "$d" ] || continue
+            any=1
+            local n sz
+            n=$(find "$d" -maxdepth 1 -iname '*.MP4' | wc -l)
+            sz=$(du -sh "$d" 2>/dev/null | cut -f1)
+            echo "  $(basename "$d") : $n clip(s), $sz"
+        done
+    fi
+    if [ "$any" = 1 ]; then
+        echo "  TOTAL footage: $(du -sh "$DEST" 2>/dev/null | cut -f1)"
+    else
+        echo "  (no footage copied yet)"
+    fi
+    echo
+    # Compare every camera clip to its SSD copy (by size) -> proves nothing is missing.
+    read -rp "  Verify everything is fully copied from the cameras? (y/N): " v
+    [ "${v,,}" = y ] && GOPRO_DEST="$DEST" python3 "$DIR/gopro_download.py" --verify
+    pause
+}
+
 toggle_manager() {
     if manager_running; then "$DIR/manager_down.sh"; else "$DIR/manager_up.sh"; fi
     pause
@@ -94,6 +124,7 @@ while true; do
     echo "  [2] Copy videos -> SSD"
     echo "  [3] Delete / wipe cards"
     if manager_running; then echo "  [4] Stop manager"; else echo "  [4] Start manager (arm)"; fi
+    echo "  [5] Inspect / verify SSD (what's copied + completeness check)"
     echo "  [0] Quit"
     read -rp "Command: " cmd
     case "$cmd" in
@@ -101,6 +132,7 @@ while true; do
         2) do_download ;;
         3) do_delete ;;
         4) toggle_manager ;;
+        5) do_inspect ;;
         0) break ;;
         "") : ;;
         *) echo "  Unknown command." ;;

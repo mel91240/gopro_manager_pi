@@ -576,6 +576,41 @@ def pick(jobs):
     return [(lbl, ip, files) for (lbl, ip), files in chosen.items()]
 
 
+def verify(jobs, dest):
+    """Compare each camera clip against its copy in `dest` and report anything
+    missing or incomplete. Matches by SIZE within the camera's folder (robust to
+    the timestamped / collision-spilled file names). Returns the number of
+    missing/incomplete clips -- 0 means everything is fully copied."""
+    print(f">>> verifying {dest} against the cameras ...")
+    grand_missing = 0
+    for label, ip, files in jobs:
+        outdir = os.path.join(dest, label)
+        have = {}                                  # size -> how many copies on disk
+        if os.path.isdir(outdir):
+            for fn in os.listdir(outdir):
+                p = os.path.join(outdir, fn)
+                if fn.lower().endswith(".mp4") and os.path.isfile(p):
+                    sz = os.path.getsize(p)
+                    have[sz] = have.get(sz, 0) + 1
+        missing = []
+        for f in files:
+            if have.get(f["size"], 0) > 0:
+                have[f["size"]] -= 1               # consume one matching copy
+            else:
+                missing.append(f)
+        cam_mb = sum(f["size"] for f in files) // 1_000_000
+        print(f"  [{label}] cameras: {len(files)} clip(s) / {cam_mb} MB  ->  "
+              f"{len(files) - len(missing)} fully on SSD, {len(missing)} missing/incomplete")
+        for f in missing:
+            print(f"     ✗ {_ts(f['cre'])}_{f['name']}  ({f['size'] // 1_000_000} MB)")
+        grand_missing += len(missing)
+    if grand_missing == 0:
+        print(">>> ✅ all camera clips have a same-size copy on the SSD -- copy is complete.")
+    else:
+        print(f">>> ⚠️ {grand_missing} clip(s) missing/incomplete -- re-run the copy to finish.")
+    return grand_missing
+
+
 # --- CLI ---------------------------------------------------------------------
 def main():
     ap = argparse.ArgumentParser(description="Offload GoPro videos (robust + resumable).")
@@ -583,6 +618,8 @@ def main():
     ap.add_argument("--parallel", action="store_true", help="force both cameras at once")
     ap.add_argument("--sequential", action="store_true", help="force one camera at a time")
     ap.add_argument("--all", action="store_true", help="include tiny (<2 MB) test clips")
+    ap.add_argument("--verify", action="store_true", help="don't copy: check every camera clip "
+                    "has a complete (same-size) copy in --dest, and report what's missing")
     ap.add_argument("--minsec", type=int, default=0, help="skip clips shorter than N seconds")
     ap.add_argument("--minsize", type=int, default=None, help="skip clips smaller than N bytes")
     ap.add_argument("--maxrate", type=float, default=0, help="cap total throughput to N MB/s "
@@ -614,6 +651,9 @@ def main():
     if not jobs:
         print(">>> nothing to copy (after filtering).")
         return 0
+    if args.verify:                       # compare against the SSD instead of copying
+        guard_dest_mounted(args.dest)     # an unmounted dest would read empty -> false "all missing"
+        return 1 if verify(jobs, args.dest) else 0
     if args.pick:
         jobs = pick(jobs)
         if not jobs:

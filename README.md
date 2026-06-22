@@ -45,6 +45,7 @@ The system spans two worlds: **Docker** (where ROS 2 lives) and the **host** (wh
 │    [2] Copy   ─► gopro_download.py   │   HTTP :8080 ─► cameras ─► SSD      │ │
 │    [3] Delete ─► gopro_delete.py     │   HTTP :8080 ─► cameras            │ │
 │    [4] Manager ─► manager_up/down.sh │                                    │ │
+│    [5] Inspect─► gopro_download.py --verify  (SSD listing + copy check)   │ │
 │                                      ▼                                    ▼ │
 │  revive.sh (watcher, systemd)   ┌───────────── DOCKER (cosma_auv image) ──┐ │
 │    │  reads .revive_request      │                                        │ │
@@ -165,6 +166,7 @@ themselves — no manual step:
   [2] Copy footage -> SSD                      -> live %/speed/ETA
   [3] Delete / wipe the cards
   [4] Start / stop the manager
+  [5] Inspect / verify SSD                     -> what's copied + completeness check
 ```
 
 Typical mission: power on (cameras auto-arm) → `gopro.sh [1]` to start the take,

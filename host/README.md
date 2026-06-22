@@ -21,6 +21,7 @@ installs these scripts into `gopro_scripts/`, and enables the two boot services
   [2] Copy footage -> SSD       (live %/speed/ETA, 'q' to cancel)
   [3] Delete / wipe the cards
   [4] Start / stop the manager
+  [5] Inspect / verify SSD       (what's copied + completeness check)
 ```
 
 - **[1] Recording** opens the ROS console (`menu.sh`): [1] start, [2] stop,
@@ -31,6 +32,11 @@ installs these scripts into `gopro_scripts/`, and enables the two boot services
 - **[3] Delete** removes media from the cards (selective or all; refuses a
   recording camera). The Open GoPro API has no real format — "all" wipes media.
 - **[4] Manager** toggles the manager container (it auto-starts at boot anyway).
+- **[5] Inspect / verify SSD** lists what is on the SSD (clips + size per camera,
+  free space), then optionally **verifies completeness**: it compares every clip
+  on the cameras against its SSD copy by size and reports anything missing or
+  half-copied — so you can confirm by hand that an offload finished in full before
+  wiping the cards. (CLI: `./download.sh --verify`.)
 
 ## Why the manager is decoupled
 
