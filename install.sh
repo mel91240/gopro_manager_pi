@@ -75,7 +75,19 @@ for svc in gopro-manager gopro-autorevive; do
         "$REPO/host/systemd/$svc.service.in" | sudo tee "/etc/systemd/system/$svc.service" >/dev/null
 done
 sudo systemctl daemon-reload
-sudo systemctl enable --now gopro-manager.service gopro-autorevive.service
+sudo systemctl enable gopro-manager.service gopro-autorevive.service
+# restart (not just --now): on a re-install the manager container is already up,
+# and manager_up.sh is a no-op when it sees a running container -- so without a
+# restart the freshly-built code would not be picked up until the next boot.
+say "restarting services to load the build"
+sudo systemctl restart gopro-autorevive.service
+if [ -f "$SCRIPTS_DST/.recording_intent" ]; then
+    echo "!!! a recording is IN PROGRESS -- NOT restarting the manager (would cut the"
+    echo "    take). The new build loads on the next manager restart: when the take is"
+    echo "    stopped, run: sudo systemctl restart gopro-manager.service"
+else
+    sudo systemctl restart gopro-manager.service
+fi
 
 say "done. The cameras now arm on every boot."
 echo "    operator menu : $SCRIPTS_DST/gopro.sh"
