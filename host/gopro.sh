@@ -12,7 +12,7 @@
 #   [4] Manager up/down   -> arm / disarm the cameras
 set -u
 DIR="$(cd "$(dirname "$0")" && pwd)"
-SSD_DEV="${SSD_DEV:-/dev/sda1}"
+SSD_DEV="${SSD_DEV:-}"            # empty = auto-detect; override with SSD_DEV=/dev/sdXN
 SSD_MNT="${SSD_MNT:-/mnt/ssd}"
 DEST="${GOPRO_DEST:-$SSD_MNT/gopro}"
 
@@ -20,13 +20,47 @@ manager_running() { docker ps --format '{{.Names}}' 2>/dev/null | grep -qx gopro
 ssd_mounted()     { mountpoint -q "$SSD_MNT" 2>/dev/null; }
 pause()           { read -rp "  (Enter to return to menu) " _; }
 
+detect_ssd_dev() {
+    # Auto-find the SSD: the LARGEST partition (that holds a filesystem and is not
+    # already mounted) on a USB-attached disk -- i.e. the external drive, not the
+    # Pi's boot card. Override with SSD_DEV=/dev/sdXN if you have several USB disks.
+    local best="" bestb=0 parent tran b
+    while IFS= read -r line; do
+        local NAME="" FSTYPE="" TYPE="" MOUNTPOINT=""
+        eval "$line"
+        [ "$TYPE" = part ] && [ -n "$FSTYPE" ] && [ -z "$MOUNTPOINT" ] || continue
+        parent=$(lsblk -no pkname "/dev/$NAME" 2>/dev/null)
+        [ -n "$parent" ] || continue
+        tran=$(lsblk -dno TRAN "/dev/$parent" 2>/dev/null)
+        [ "$tran" = usb ] || continue
+        b=$(lsblk -bdno SIZE "/dev/$NAME" 2>/dev/null)
+        [ "${b:-0}" -gt "$bestb" ] && { bestb=$b; best="/dev/$NAME"; }
+    done < <(lsblk -Pno NAME,FSTYPE,TYPE,MOUNTPOINT)
+    [ -n "$best" ] && { echo "$best"; return 0; }
+    return 1
+}
+
 ensure_dest() {
     # Mount the SSD if needed, then make sure DEST exists AND is writable by us.
-    # Done every time (not only on first mount) -- /mnt/ssd is root-owned, so the
-    # destination folder must be created+chowned once or python (as pi) can't write.
+    # The mount point is root-owned, so DEST is created+chowned once.
     if ! ssd_mounted; then
-        echo ">>> mounting SSD ($SSD_DEV -> $SSD_MNT)..."
-        sudo mount "$SSD_DEV" "$SSD_MNT" || { echo "!!! SSD mount failed"; return 1; }
+        local dev="$SSD_DEV"
+        if [ -z "$dev" ]; then
+            dev=$(detect_ssd_dev) || {
+                echo "!!! No external USB disk with a filesystem found to mount as the SSD."
+                echo "    Check it is plugged in:   lsblk"
+                echo "    Mount it by hand:         sudo mkdir -p $SSD_MNT && sudo mount /dev/sdXN $SSD_MNT"
+                echo "    Or tell the menu which device:  SSD_DEV=/dev/sdXN ./gopro.sh"
+                return 1; }
+            echo ">>> auto-detected SSD: $dev"
+        fi
+        sudo mkdir -p "$SSD_MNT"          # create the mount point if missing (fresh image has no /mnt/ssd)
+        echo ">>> mounting SSD ($dev -> $SSD_MNT)..."
+        sudo mount "$dev" "$SSD_MNT" || {
+            echo "!!! SSD mount failed. Diagnose / mount by hand:"
+            echo "      sudo mkdir -p $SSD_MNT && sudo mount $dev $SSD_MNT"
+            echo "      (check 'lsblk' for the device, 'dmesg | tail' for the reason)"
+            return 1; }
     fi
     if [ ! -w "$DEST" ]; then
         sudo mkdir -p "$DEST" && sudo chown "$(id -u):$(id -g)" "$DEST" \
