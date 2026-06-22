@@ -86,6 +86,7 @@ class GoProManagerNode(Node):
         self.message = 'starting up'
         self._strikes = {}
         self._grace_until = {}
+        self._record_grace_until = 0.0   # post-(re)start encoder-init window; suppresses the all-lost emergency ONLY during a legitimate start, not a per-camera recovery
         self._cooldown_until = {}
         self._recovering = {}       # label -> monotonic time it dropped (soft, being retried)
         self._recover_attempts = {} # label -> recovery cycles tried (0 = drop seen, not retried yet)
@@ -205,6 +206,12 @@ class GoProManagerNode(Node):
                 if cam.ip not in known:
                     self.cameras.append(cam)
                     self._track(cam)
+                    # A camera that just (re)enumerated mid-recording needs to be
+                    # re-armed + restarted before it encodes again; give it the same
+                    # grace as a fresh start so the watchdog doesn't strike it
+                    # immediately (premature Vbus request / FAULT on a routine USB
+                    # re-enum).
+                    self._grace_until[cam.label] = time.monotonic() + self.grace_period
                     self.get_logger().info(f'Camera appeared on the bus: {cam!r}')
             return
 
@@ -254,6 +261,7 @@ class GoProManagerNode(Node):
             # while filming). Give the watchdog a grace period so it does not
             # mistake the adoption moment for a dropout.
             grace = time.monotonic() + self.grace_period
+            self._record_grace_until = grace
             for c in self.cameras:
                 self._grace_until[c.label] = grace
             self.get_logger().info('Adopted an in-progress recording; watchdog now active.')
@@ -320,6 +328,7 @@ class GoProManagerNode(Node):
         self._recovering.clear()
         self._recover_attempts.clear()
         grace = time.monotonic() + self.grace_period
+        self._record_grace_until = grace
         for c in self.cameras:
             self._grace_until[c.label] = grace
             self._cooldown_until[c.label] = 0.0
@@ -403,6 +412,7 @@ class GoProManagerNode(Node):
             self._recover_attempts.clear()
             self._faulted.clear()
             grace = time.monotonic() + self.grace_period   # encoder-init grace
+            self._record_grace_until = grace
             for c in self.cameras:
                 self._grace_until[c.label] = grace
                 self._cooldown_until[c.label] = 0.0
@@ -636,11 +646,13 @@ class GoProManagerNode(Node):
         # Recording, but NOTHING is being filmed (every camera dropped at once)?
         # Immediate emergency -- don't wait fault_after: the vehicle must hold
         # position because we are no longer capturing. Auto-clears the instant
-        # any camera resumes. Suppressed during the post-start grace window,
-        # where the encoder is still spinning up and reads as "not recording".
+        # any camera resumes. Suppressed ONLY during the post-(re)start encoder-init
+        # window (_record_grace_until). Deliberately NOT gated on the per-camera
+        # graces: a single freshly re-appeared camera's recovery grace used to mask
+        # this emergency for the genuinely-dead ones (via max()) for up to
+        # grace_period -- exactly when the vehicle most needs to hold.
         all_lost = (self.recording and n > 0 and recording_now == 0
-                    and now >= max(self._grace_until.get(c.label, 0.0)
-                                   for c in self.cameras))
+                    and now >= self._record_grace_until)
         if self._faulted:
             self.state = GoProSystem.STATE_FAULT
             reasons = ', '.join(f'{k} ({v})' for k, v in sorted(self._faulted.items()))
