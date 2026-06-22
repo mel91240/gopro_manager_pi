@@ -213,18 +213,21 @@ def main(args=None):
                     if input('Cameras not all READY. Start anyway? (y/N): ').strip().lower() != 'y':
                         continue
                 resp = node.call(node.record_cli, SetBool.Request(data=True))
-                print(f'-> {resp.message}' if resp else '-> no response from gopro_manager')
+                print(f"-> [{'OK' if resp.success else 'FAILED'}] {resp.message}"
+                      if resp else '-> no response from gopro_manager')
 
             elif choice == '2':
                 resp = node.call(node.record_cli, SetBool.Request(data=False))
-                print(f'-> {resp.message}' if resp else '-> no response from gopro_manager')
+                print(f"-> [{'OK' if resp.success else 'FAILED'}] {resp.message}"
+                      if resp else '-> no response from gopro_manager')
 
             elif choice == '3':
                 if node.system and node.system.recording:
                     print('Stop recording before changing settings.')
                     continue
                 resp = node.call(node.settings_cli, _build_settings_request())
-                print(f'-> {resp.message}' if resp else '-> no response from gopro_manager')
+                print(f"-> [{'OK' if resp.success else 'FAILED'}] {resp.message}"
+                      if resp else '-> no response from gopro_manager')
 
             elif choice == '0':
                 break

@@ -145,8 +145,12 @@ Node `gopro_manager` (private namespace):
 
 ### Parameters (`params/gopro_params.yaml`)
 `camera_labels`, `tick_period` (1 s), `strikes_before_restart` (2),
-`record_grace_period` (10 s), `restart_cooldown` (0 s), `fault_after` (30 s),
-`discovery_timeout` (20 s), `resume_on_restart` (true), `state_file`.
+`fault_after_attempts` (2), `record_grace_period` (10 s), `restart_cooldown`
+(0 s), `fault_after` (30 s), `discovery_timeout` (20 s), `resume_on_restart`
+(true), `state_file`. Brown-out Vbus recovery: `vbus_recover_after` (3),
+`vbus_cooldown` (45 s), `vbus_request_file`. The file is loaded at runtime
+(`manager_up.sh` passes it with `--params-file`), so editing a value takes effect
+on the next manager restart.
 
 ---
 
@@ -163,13 +167,16 @@ docker run --rm -v ~/dev/swarm-vehicle:/home/cosma_auv/swarm-vehicle \
    colcon build --packages-select gopro_msgs gopro_control"
 ```
 
-The host watcher needs passwordless `uhubctl`:
-`/etc/sudoers.d/uhubctl` → `pi ALL=(ALL) NOPASSWD: /usr/sbin/uhubctl`
-(`install_service.sh` assumes this is in place).
+The host watcher needs passwordless `uhubctl`
+(`/etc/sudoers.d/uhubctl` → `<user> ALL=(root) NOPASSWD: /usr/sbin/uhubctl`).
+`install_service.sh` now installs this rule automatically.
 
-The manager + menu containers use `--network host --ipc host -e ROS_DOMAIN_ID=0
--e ROS_LOCALHOST_ONLY=1` (required for cross-container DDS discovery on the same
-host). The scripts set these.
+The manager + menu containers use `--network host -e ROS_DOMAIN_ID=0
+-e ROS_LOCALHOST_ONLY=1` plus a FastDDS UDP-only profile
+(`FASTRTPS_DEFAULT_PROFILES_FILE=.../fastdds_udp_only.xml`). `--ipc host` is
+deliberately NOT used: each container has a private `/dev/shm`, so shared-memory
+DDS would discover topics yet deliver no data (and leak SHM on `docker rm -f`);
+UDP-localhost is robust for these tiny messages. The scripts set these.
 
 ---
 

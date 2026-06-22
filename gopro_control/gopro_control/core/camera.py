@@ -248,9 +248,11 @@ class GoPro:
     def can_power_cycle(self) -> bool:
         return bool(self.hub and self.port)
 
-    def power_cycle(self, off_seconds: int = 4, boot_timeout: float = 35.0) -> bool:
+    def power_cycle(self, off_seconds: int = 8, boot_timeout: float = 35.0) -> bool:
         """Cut Vbus on this camera's hub port and bring it back. The camera
-        fully reboots (~15s). Returns True once its HTTP API answers again."""
+        fully reboots (~15s). Returns True once its HTTP API answers again.
+        Default 8s OFF matches revive.sh's off-bus cut: a no-battery Hero 12
+        sometimes fails to cold-boot on a shorter (4s) cut."""
         if not self.can_power_cycle():
             return False
         subprocess.run(

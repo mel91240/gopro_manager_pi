@@ -34,7 +34,8 @@ the right size is skipped -> an interrupted run just resumes.
   ./download.sh --all            include tiny (<2 MB) test clips too
   GOPRO_DEST=/mnt/ssd ./download.sh
 
-Importable by the pi_menu: see discover() / gather() / download_all().
+Run from gopro.sh [2] (the operator menu) or directly via download.sh. The core
+helpers discover() / gather() / download_all() are importable for reuse.
 """
 import argparse
 import errno
@@ -372,7 +373,10 @@ def _reporter(progress):
 def _download_one(ip, label, f, dest, lock, c, progress=None):
     """Returns 'ok' (downloaded or already present), 'fail', or 'gone' (camera
     unreachable). Raises NoSpaceError if the destination filled up."""
-    name = f"{_ts(f['cre'])}_{f['name']}"
+    # Sanitize the camera-supplied name so it can never escape the output dir
+    # (defense-in-depth: GoPro names are GHxxxxxx.MP4, but never trust them blindly).
+    safe_name = os.path.basename(f['name']).replace('/', '_').replace('\\', '_')
+    name = f"{_ts(f['cre'])}_{safe_name}"
     outdir = os.path.join(dest, label)
     os.makedirs(outdir, exist_ok=True)
     size = f["size"]
