@@ -122,15 +122,21 @@ class GoPro:
     def init(self) -> bool:
         """Arm wired control and select video mode. Must run before recording,
         otherwise shutter/start returns HTTP 500 (camera still in MTP mode)."""
-        self._request("/gopro/camera/control/wired_usb?p=1", timeout=4)
+        wired_code, _ = self._request("/gopro/camera/control/wired_usb?p=1", timeout=4)
         time.sleep(1.5)
         # Disable idle auto-power-off (setting 59 = Never). The cameras run on USB
         # with NO battery, so this reverts to a few minutes after any power loss;
         # re-assert it on every arm so an idle camera never sleeps into a
         # capture-dead state (answers /state 200 but /shutter 500) mid-mission.
+        # Best-effort: it is re-enforced continuously by the manager, so a transient
+        # failure here must NOT make a camera that IS in wired video mode look unarmed.
         self.set_setting(AUTO_POWER_OFF, AUTO_POWER_OFF_NEVER)
         time.sleep(0.3)
-        return self.set_preset_group(PRESET_GROUP_VIDEO)
+        preset_ok = self.set_preset_group(PRESET_GROUP_VIDEO)
+        # init() must reflect the wired-control switch too: if wired_usb did not
+        # return 200 the camera is still in MTP mode and shutter/start will 500, so
+        # report failure instead of a false 'armed' from a lucky preset call.
+        return preset_ok and wired_code == 200
 
     def enable_wired_control(self) -> None:
         """Re-assert wired USB control without touching the preset/settings. A
