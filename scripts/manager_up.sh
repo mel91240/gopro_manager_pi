@@ -31,7 +31,8 @@ docker run -d --name "$NAME" --restart unless-stopped \
     --entrypoint bash "$IMAGE" -lc '
         source /opt/ros/humble/setup.bash &&
         source /home/cosma_auv/swarm-vehicle/ros2_ws/install/setup.bash &&
-        exec ros2 run gopro_control gopro_manager'
+        exec ros2 run gopro_control gopro_manager --ros-args --params-file \
+            /home/cosma_auv/swarm-vehicle/ros2_ws/src/gopro_control/params/gopro_params.yaml'
 
 echo ">>> Manager up (survives SSH disconnect)."
 

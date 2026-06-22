@@ -1,10 +1,23 @@
 gopro_manager:
   ros__parameters:
-    camera_labels: ["RIGHT", "LEFT"]   # labels map to USB sockets in hub/port order (1st label -> 1st socket); order set to match this rig's physical left/right
+    # NOTE: this file is the single source of truth for the manager's parameters.
+    # It IS loaded at runtime (manager_up.sh passes it with --ros-args
+    # --params-file), so editing a value here changes behaviour on the next
+    # manager restart -- keep it in sync with the declare_parameter() defaults.
+    camera_labels: ["LEFT", "RIGHT"]   # labels map to USB sockets in (hub,port) order (1st label -> 1st socket): port2(.185)=LEFT, port4(.575)=RIGHT
     tick_period: 1.0                   # [s] status publish + watchdog health-check period
     strikes_before_restart: 2          # consecutive "not recording" checks before a soft restart
     record_grace_period: 10.0          # [s] after start: encoder init time, watchdog stays quiet
     restart_cooldown: 0.0              # [s] min delay between soft restarts (0 = retry every tick)
-    # NOTE: recovery is software-only (re-arm + start), and never gives up while
-    # recording. Vbus power-cycling is intentionally NOT done here -- cutting
-    # power can corrupt the SD card's FTL.
+    fault_after: 30.0                  # [s] a camera lost this long -> mission compromised (EMERGENCY)
+    discovery_timeout: 20.0            # [s] wait for all cameras to enumerate at boot
+    resume_on_restart: true            # auto-resume recording after a Pi reboot (mid-mission)
+    # --- brown-out (capture-dead) recovery: ask the host watcher for a Vbus cycle ---
+    # Recovery is software-first (re-arm + start). Only a camera that is reachable
+    # but cannot record after vbus_recover_after soft re-arms (the no-battery
+    # brown-out zombie) triggers a TARGETED host Vbus cycle of its OWN socket --
+    # never while it is recording, never another camera's socket.
+    vbus_recover_after: 3              # failed soft re-arms before requesting a host Vbus cycle
+    vbus_cooldown: 45.0                # [s] min between Vbus requests for one camera (cycle + cold-boot + re-arm)
+    vbus_request_file: "/home/cosma_auv/swarm-vehicle/gopro_scripts/.revive_request"   # host watcher (revive.sh) polls this
+    state_file: "/home/cosma_auv/swarm-vehicle/gopro_scripts/.recording_intent"        # persists the "was recording" intent across a reboot
