@@ -25,8 +25,11 @@ CONFIRM=3                     # consecutive scans a port must be empty before we
 SCAN=2                        # [s] between scans  (CONFIRM*SCAN = confirmation window)
 REQ="$(cd "$(dirname "$0")" && pwd)/.revive_request"   # manager writes "hub:port" here for a targeted Vbus cycle (on-bus capture-dead cam)
 REQ_OFF=15                    # [s] Vbus OFF for a requested cycle (a capture-dead/black-but-lit cam needs a long cut, not the 4s of an off-bus blip)
+BOOT_SETTLE=30                # [s] after ANY cycle, ignore that socket's emptiness this long (it is booting/enumerating) -> never re-cut a camera mid-boot
+BOOT_SCANS=$(( (BOOT_SETTLE + SCAN - 1) / SCAN ))   # the above expressed in scan ticks
 
 declare -A PORT_TAKEN         # hub:port -> 1  (a GoPro is enumerated there right now)
+CYCLED_PORT=                  # set by handle_request to the socket it just cycled (so the watch loop can grant it a boot grace)
 
 scan_now() {
     PORT_TAKEN=()
@@ -75,26 +78,36 @@ handle_request() {
     fi
     echo "[autorevive] manager requested Vbus power-cycle of $target (on-bus capture-dead) -> cutting ${REQ_OFF}s"
     cycle_port_long "$target"
+    CYCLED_PORT=$target          # tell the watch loop to let this socket boot (don't re-cut it)
 }
 
 if [[ "${1:-}" == "--watch" ]]; then
     echo "[autorevive] watching (power-cycle ONLY a socket confirmed empty for ~$((CONFIRM*SCAN))s; never a visible camera)"
-    declare -A MISS
+    declare -A MISS GRACE
     while true; do
+        CYCLED_PORT=
         handle_request
+        if [[ -n $CYCLED_PORT ]]; then         # a requested cycle just happened
+            GRACE[$CYCLED_PORT]=$BOOT_SCANS     # protect it while it cold-boots
+            MISS[$CYCLED_PORT]=0
+        fi
         mapfile -t missing < <(missing_ports)
         declare -A seen=()
         for hp in "${missing[@]:-}"; do
             [[ -z $hp ]] && continue
             seen[$hp]=1
+            if (( ${GRACE[$hp]:-0} > 0 )); then    # just cycled -> still booting, do NOT re-cut
+                GRACE[$hp]=$(( GRACE[$hp] - 1 )); MISS[$hp]=0; continue
+            fi
             MISS[$hp]=$(( ${MISS[$hp]:-0} + 1 ))
             if (( ${MISS[$hp]} >= CONFIRM )); then
                 echo "[autorevive] socket $hp empty for ${MISS[$hp]} scans -> power-cycle"
                 cycle_port "$hp"; MISS[$hp]=0
-                sleep 30                       # let it boot/enumerate before scanning again
+                GRACE[$hp]=$BOOT_SCANS          # non-blocking boot grace (replaces the old blocking sleep 30)
             fi
         done
-        for hp in "${!MISS[@]}"; do [[ -z ${seen[$hp]:-} ]] && MISS[$hp]=0; done   # back -> reset
+        for hp in "${!MISS[@]}";  do [[ -z ${seen[$hp]:-} ]] && MISS[$hp]=0;  done   # back on bus -> reset strikes
+        for hp in "${!GRACE[@]}"; do [[ -z ${seen[$hp]:-} ]] && GRACE[$hp]=0; done   # back on bus -> clear boot grace
         sleep "$SCAN"
     done
 fi
