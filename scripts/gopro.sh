@@ -37,6 +37,15 @@ ensure_dest() {
 do_download() {
     ensure_dest || { pause; return; }
     echo ">>> Destination: $DEST"
+    # Soft guard: copying during an active recording adds USB-bus load that can
+    # brown-out a no-battery camera mid-record (auto-revive would then power-cycle
+    # it). The downloader itself is safe to run while the manager is up, but doing
+    # it DURING a mission recording is the operator's call -- ask first.
+    if [ -f "$DIR/.recording_intent" ]; then
+        echo "!!! A recording is IN PROGRESS (mission intent set)."
+        read -rp "  Copy anyway while recording? (y/N): " yn
+        [ "${yn,,}" = y ] || { echo ">>> cancelled (recording in progress)."; pause; return; }
+    fi
     # No default action: an empty/unknown answer copies NOTHING. Copying every
     # clip is the slow, full-bus operation -- it must be asked for explicitly
     # (lowercase or uppercase), never triggered by a stray key or a bare Enter.
@@ -49,7 +58,9 @@ do_download() {
     # bound, so 'nice' costs it almost nothing; 'ionice -c2 -n7' is best-effort-
     # low, not idle, so it doesn't starve the transfer). The real anti-freeze is
     # the periodic fsync inside the downloader.
-    read -rp "  Pick clips [p], copy ALL [a], or cancel [q]? (p/a/q): " m
+    # [a] copies all real footage; clips <2 MB (0 s test clips) are skipped by
+    # design -- to include them too, use the CLI: ./download.sh --all
+    read -rp "  Pick clips [p], copy all footage [a], or cancel [q]? (p/a/q): " m
     local LOW="nice -n 19 ionice -c2 -n7"
     case "${m,,}" in
         p)      GOPRO_DEST="$DEST" $LOW python3 "$DIR/gopro_download.py" --pick ;;
