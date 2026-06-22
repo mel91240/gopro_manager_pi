@@ -7,6 +7,7 @@ gopro_manager:
     camera_labels: ["LEFT", "RIGHT"]   # labels map to USB sockets in (hub,port) order (1st label -> 1st socket): port2(.185)=LEFT, port4(.575)=RIGHT
     tick_period: 1.0                   # [s] status publish + watchdog health-check period
     strikes_before_restart: 2          # consecutive "not recording" checks before a soft restart
+    fault_after_attempts: 2            # failed recovery attempts on a recovering camera before DEGRADED escalates to FAULT
     record_grace_period: 10.0          # [s] after start: encoder init time, watchdog stays quiet
     restart_cooldown: 0.0              # [s] min delay between soft restarts (0 = retry every tick)
     fault_after: 30.0                  # [s] a camera lost this long -> mission compromised (EMERGENCY)

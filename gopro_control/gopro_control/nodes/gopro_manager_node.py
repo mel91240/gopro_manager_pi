@@ -47,6 +47,7 @@ class GoProManagerNode(Node):
         self.declare_parameter('camera_labels', ['LEFT', 'RIGHT'])   # 1st label -> 1st USB socket by (hub,port) order: port2(.185)=LEFT, port4(.575)=RIGHT
         self.declare_parameter('tick_period', 1.0)                   # status publish + watchdog period [s]
         self.declare_parameter('strikes_before_restart', 2)          # consecutive bad checks before acting
+        self.declare_parameter('fault_after_attempts', 2)            # failed recovery attempts on a recovering cam before escalating DEGRADED -> FAULT
         self.declare_parameter('record_grace_period', 10.0)          # [s] after start: encoder init, watchdog waits
         self.declare_parameter('restart_cooldown', 0.0)              # [s] between recovery attempts (0 = every tick)
         self.declare_parameter('fault_after', 30.0)                  # [s] a cam lost this long -> mission compromised
@@ -62,6 +63,7 @@ class GoProManagerNode(Node):
         self.labels = [str(x) for x in self.get_parameter('camera_labels').value]
         self.expected = len(self.labels)
         self.strikes_max = int(self.get_parameter('strikes_before_restart').value)
+        self.fault_after_attempts = int(self.get_parameter('fault_after_attempts').value)
         self.grace_period = float(self.get_parameter('record_grace_period').value)
         self.restart_cooldown = float(self.get_parameter('restart_cooldown').value)
         self.fault_after = float(self.get_parameter('fault_after').value)
@@ -669,7 +671,8 @@ class GoProManagerNode(Node):
             # often just a transient re-enumeration), while we keep retrying.
             # Backstop: FAULT anyway if a camera has been lost past fault_after.
             # FAULT self-clears the instant the camera records again.
-            failed = any(self._recover_attempts.get(l, 0) >= 2 for l in self._recovering)
+            failed = any(self._recover_attempts.get(l, 0) >= self.fault_after_attempts
+                         for l in self._recovering)
             if failed or worst >= self.fault_after:
                 self.state = GoProSystem.STATE_FAULT
                 why = 'recovery failed' if failed else f'lost {int(worst)}s'
