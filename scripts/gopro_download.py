@@ -37,15 +37,60 @@ the right size is skipped -> an interrupted run just resumes.
 Importable by the pi_menu: see discover() / gather() / download_all().
 """
 import argparse
+import errno
 import json
 import os
 import re
+import socket
 import subprocess
 import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from urllib.error import URLError
 from urllib.request import urlopen, Request
+
+
+class NoSpaceError(Exception):
+    """Raised when a write fails with ENOSPC -- retrying cannot help, so the whole
+    offload should stop with a clear message rather than burn the retry budget."""
+
+
+GONE_LIMIT = 3                       # consecutive connection failures on one camera -> abandon its remaining clips
+
+
+def _looks_like_mp4(path):
+    """Cheap sanity check: every GoPro clip begins with an MP4 'ftyp' box. Catches
+    a wrong/garbage file (e.g. a stale .part left from a recycled GHxxxx name after
+    an SD wipe) being promoted as a valid MP4. NOT a full integrity check."""
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(12)
+    except OSError:
+        return False
+    return len(head) >= 8 and head[4:8] == b"ftyp"
+
+
+def _is_gone(exc):
+    """True if `exc` looks like the camera went away (connection-level), vs a
+    transient stall worth retrying further up."""
+    return isinstance(exc, (URLError, ConnectionError, socket.timeout, TimeoutError))
+
+
+def _resolve_out(outdir, name, size):
+    """Pick the output path for this clip. If `name` is already taken by a same-SIZE
+    file it's the same clip already offloaded -> return (path, done=True). If taken
+    by a DIFFERENT-size file (a filename collision after an SD wipe recycled the
+    GHxxxx name), pick the next free '<base>__N<ext>' so NEITHER clip is lost."""
+    base, ext = os.path.splitext(name)
+    cand = os.path.join(outdir, name)
+    i = 1
+    while os.path.exists(cand):
+        if os.path.getsize(cand) == size:
+            return cand, True
+        i += 1
+        cand = os.path.join(outdir, f"{base}__{i}{ext}")
+    return cand, False
 
 PORT = 8080
 LABELS = ["LEFT", "RIGHT", "CAM2", "CAM3"]
@@ -206,6 +251,12 @@ def _retrying(ip, fn):
         try:
             fn()
             return
+        except OSError as e:
+            if e.errno == errno.ENOSPC:
+                raise NoSpaceError("destination filesystem is full") from e
+            last = e
+            _reinit(ip)
+            time.sleep(BACKOFF)
         except Exception as e:
             last = e
             _reinit(ip)
@@ -319,38 +370,62 @@ def _reporter(progress):
 
 
 def _download_one(ip, label, f, dest, lock, c, progress=None):
+    """Returns 'ok' (downloaded or already present), 'fail', or 'gone' (camera
+    unreachable). Raises NoSpaceError if the destination filled up."""
     name = f"{_ts(f['cre'])}_{f['name']}"
     outdir = os.path.join(dest, label)
     os.makedirs(outdir, exist_ok=True)
-    out = os.path.join(outdir, name)
     size = f["size"]
-    if os.path.exists(out) and os.path.getsize(out) == size:
+    out, done = _resolve_out(outdir, name, size)   # collision-safe (never overwrite a different clip)
+    if done:
         if progress is not None:
             progress.add(size)
             progress.file_done()
-        return
+        return "ok"
     tmp = out + ".part"
+    # A pre-existing FULL-size .part with a bad MP4 header is stale/corrupt (e.g. a
+    # recycled GHxxxx name after an SD wipe). Drop it so we re-download cleanly
+    # instead of promoting garbage as a valid clip.
+    if os.path.exists(tmp) and os.path.getsize(tmp) >= size and not _looks_like_mp4(tmp):
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
     try:
         # one resumable connection per file (robust; resumes a flaky cam). On this
         # rig -- two USB2-class cameras already pulled in parallel -- splitting a
         # file into more connections only adds bus contention (measured slower).
         _retrying(ip, lambda: _pull_range(ip, f, size - 1, tmp, size, progress))
 
-        if os.path.getsize(tmp) == size:
+        if os.path.getsize(tmp) == size and _looks_like_mp4(tmp):
             os.replace(tmp, out)
             with lock:
                 c["n"] += 1
                 c["bytes"] += size
             if progress is not None:
                 progress.file_done()
+            return "ok"
+        # Full size but bad header -> corrupt; drop it so the next run re-downloads
+        # clean. A short (truncated) .part is a genuine partial -> keep for resume.
+        if os.path.getsize(tmp) == size:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            reason = "corrupt (bad MP4 header); discarded, will re-download"
         else:
-            with lock:
-                c["fail"] += 1
-            _emit(f"  [{label}] FAIL  {name} (size mismatch; .part kept for resume)")
+            reason = "size mismatch; .part kept for resume"
+        with lock:
+            c["fail"] += 1
+        _emit(f"  [{label}] FAIL  {name} ({reason})")
+        return "fail"
+    except NoSpaceError:
+        raise                                  # fatal: stop the whole offload
     except Exception as e:
         with lock:
             c["fail"] += 1
         _emit(f"  [{label}] FAIL  {name}: {e}  (.part kept for resume)")
+        return "gone" if _is_gone(e) else "fail"
 
 
 def guard_dest_mounted(dest):
@@ -389,8 +464,21 @@ def download_all(jobs, dest, lock=None, counters=None, parallel=False):
         reporter.start()
 
     def camera_worker(label, ip, files):
-        for f in files:
-            _download_one(ip, label, f, dest, lock, c, progress)
+        gone = 0
+        for i, f in enumerate(files):
+            st = _download_one(ip, label, f, dest, lock, c, progress)
+            if st == "gone":
+                gone += 1
+                if gone >= GONE_LIMIT:            # camera left -> don't burn retries on the rest
+                    remaining = len(files) - i - 1
+                    if remaining:
+                        with lock:
+                            c["fail"] += remaining
+                        _emit(f"  [{label}] unreachable for {gone} clips -> abandoning "
+                              f"{remaining} remaining (re-run when it's back; resumable).")
+                    break
+            else:
+                gone = 0
 
     try:
         if parallel and len(jobs) > 1:
@@ -399,6 +487,9 @@ def download_all(jobs, dest, lock=None, counters=None, parallel=False):
         else:
             for label, ip, files in jobs:
                 camera_worker(label, ip, files)
+    except NoSpaceError:
+        _emit("!!! DISK FULL -- stopping the offload. Free space or mount a bigger "
+              "disk, then re-run (already-copied clips are skipped, partials resume).")
     finally:
         progress.stop = True
         if reporter is not None:
