@@ -5,9 +5,9 @@ Wants=docker.service
 
 [Service]
 Type=simple
-User=pi
-# absolute path -- adjust if the repo lives elsewhere on the Pi
-ExecStart=/usr/bin/stdbuf -oL /home/pi/dev/swarm-vehicle/gopro_scripts/revive.sh --watch
+User=__USER__
+# Paths filled in by install.sh (sed on __GOPRO_SCRIPTS__) -- never hard-coded.
+ExecStart=/usr/bin/stdbuf -oL __GOPRO_SCRIPTS__/revive.sh --watch
 Restart=always
 RestartSec=5
 

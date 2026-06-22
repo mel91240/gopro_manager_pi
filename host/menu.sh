@@ -5,8 +5,9 @@
 # (e.g. RECORDING 2/2) so a take can be stopped and the footage recovered.
 set -e
 
-IMAGE=cosma_auv:latest
-WS="$HOME/dev/swarm-vehicle"
+DIR="$(cd "$(dirname "$0")" && pwd)"   # .../gopro_scripts
+IMAGE="${COSMA_IMAGE:-cosma_auv:latest}"
+WS="${GOPRO_WS:-$(dirname "$DIR")}"     # workspace = parent of gopro_scripts (no hard-coded path)
 
 if ! docker ps --format '{{.Names}}' | grep -qx gopro_manager; then
     echo "!!! Manager is not running (it normally auto-starts at boot)."

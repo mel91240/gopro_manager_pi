@@ -1,13 +1,13 @@
 #!/bin/bash
 # Start the GoPro manager (arms the cameras) as a detached, named Docker
 # container that survives SSH disconnects. Normally started automatically at boot
-# by gopro-manager.service (install with ./install_service.sh); run by hand only
-# as a fallback, or on a host where the service isn't installed.
+# by gopro-manager.service (installed by ./install.sh); run by hand only as a
+# fallback, or on a host where the service isn't installed.
 set -e
 
-DIR="$(cd "$(dirname "$0")" && pwd)"
-IMAGE=cosma_auv:latest
-WS="$HOME/dev/swarm-vehicle"
+DIR="$(cd "$(dirname "$0")" && pwd)"   # .../gopro_scripts
+IMAGE="${COSMA_IMAGE:-cosma_auv:latest}"
+WS="${GOPRO_WS:-$(dirname "$DIR")}"     # workspace = parent of gopro_scripts (no hard-coded path)
 NAME=gopro_manager
 
 if docker ps --format '{{.Names}}' | grep -qx "$NAME"; then
@@ -37,11 +37,11 @@ docker run -d --name "$NAME" --restart unless-stopped \
 echo ">>> Manager up (survives SSH disconnect)."
 
 # The auto-revive watcher runs as a systemd service (starts on boot). Install it
-# once with ./install_service.sh. We just report its state here.
+# once with ./install.sh. We just report its state here.
 if systemctl is-active --quiet gopro-autorevive.service 2>/dev/null; then
     echo ">>> auto-revive watcher: active (systemd)"
 else
-    echo ">>> auto-revive watcher: NOT running -- install it once: ./install_service.sh"
+    echo ">>> auto-revive watcher: NOT running -- install it once: ./install.sh"
 fi
 
 echo ">>> Logs: ./manager_log.sh   |   operator menu: ./gopro.sh"

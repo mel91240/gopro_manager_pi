@@ -9,11 +9,11 @@ Wants=docker.service
 # --restart unless-stopped) keeps it alive at runtime, systemd (re)starts it at boot.
 Type=oneshot
 RemainAfterExit=yes
-User=pi
-Environment=HOME=/home/pi
-# absolute path -- adjust if the repo lives elsewhere on the Pi
-ExecStart=/home/pi/dev/swarm-vehicle/gopro_scripts/manager_up.sh
-ExecStop=/home/pi/dev/swarm-vehicle/gopro_scripts/manager_down.sh
+User=__USER__
+Environment=HOME=__HOME__
+# Paths filled in by install.sh (sed on __GOPRO_SCRIPTS__) -- never hard-coded.
+ExecStart=__GOPRO_SCRIPTS__/manager_up.sh
+ExecStop=__GOPRO_SCRIPTS__/manager_down.sh
 
 [Install]
 WantedBy=multi-user.target

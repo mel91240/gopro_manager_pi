@@ -6,9 +6,9 @@ you normally never start anything by hand.
 
 ## Setup (once)
 
-```bash
-./install_service.sh     # installs + enables gopro-manager + gopro-autorevive
-```
+From the repo root (not here), run `./install.sh` — it builds the packages,
+installs these scripts into `gopro_scripts/`, and enables the two boot services
+(`gopro-manager` + `gopro-autorevive`). See the top-level README.
 
 ## Operator menu
 

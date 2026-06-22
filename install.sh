@@ -1,0 +1,83 @@
+#!/bin/bash
+# install.sh -- add the GoPro rig to a Pi that already has the base AUV setup.
+#
+# One command turns a base-image Pi (BlueOS + the cosma_auv image + the
+# swarm-vehicle workspace) into a working GoPro rig: it drops the two ROS
+# packages into the workspace, builds them in the cosma_auv container, installs
+# the host scripts, the uhubctl sudoers rule and the two systemd services, then
+# enables them so the cameras arm themselves on every boot.
+#
+# It is idempotent: safe to re-run to update an existing install.
+#
+#   ./install.sh
+#   GOPRO_WS=/path/to/swarm-vehicle ./install.sh     # non-default workspace
+#   COSMA_IMAGE=myimage:tag ./install.sh             # non-default ROS image
+#
+# Nothing here is GoPro-version-specific to one Pi: paths are derived, not
+# hard-coded, so the same repo installs on any Pi.
+set -euo pipefail
+
+REPO="$(cd "$(dirname "$0")" && pwd)"
+RUN_USER="${SUDO_USER:-$USER}"
+USER_HOME="$(eval echo "~$RUN_USER")"
+GOPRO_WS="${GOPRO_WS:-$USER_HOME/dev/swarm-vehicle}"
+IMAGE="${COSMA_IMAGE:-cosma_auv:latest}"
+
+WS_SRC="$GOPRO_WS/ros2_ws/src"
+SCRIPTS_DST="$GOPRO_WS/gopro_scripts"
+PKGS="gopro_msgs gopro_control"
+
+say() { echo ">>> $*"; }
+die() { echo "!!! $*" >&2; exit 1; }
+
+say "GoPro install"
+echo "    workspace : $GOPRO_WS"
+echo "    ROS image : $IMAGE"
+echo "    user      : $RUN_USER"
+[ -d "$GOPRO_WS/ros2_ws" ] || die "no ros2_ws under $GOPRO_WS -- is this the AUV workspace? (set GOPRO_WS=)"
+command -v docker >/dev/null || die "docker not found"
+docker image inspect "$IMAGE" >/dev/null 2>&1 || die "docker image '$IMAGE' not found (set COSMA_IMAGE=)"
+
+# 1. ROS packages -> workspace src (replace cleanly so no stale files linger)
+say "copying ROS packages into $WS_SRC"
+mkdir -p "$WS_SRC"
+for p in gopro_control gopro_msgs; do
+    rm -rf "${WS_SRC:?}/$p"
+    cp -r "$REPO/ros2_pkgs/$p" "$WS_SRC/$p"
+done
+
+# 2. build them inside the cosma_auv container (ROS 2 lives only in the image)
+say "building $PKGS in the $IMAGE container (colcon)"
+docker run --rm -v "$GOPRO_WS":/home/cosma_auv/swarm-vehicle --entrypoint bash "$IMAGE" -lc \
+    "source /opt/ros/humble/setup.bash && cd /home/cosma_auv/swarm-vehicle/ros2_ws && \
+     colcon build --packages-select $PKGS" \
+    || die "colcon build failed"
+
+# 3. host scripts -> gopro_scripts/
+say "installing host scripts into $SCRIPTS_DST"
+mkdir -p "$SCRIPTS_DST"
+cp "$REPO"/host/*.sh "$REPO"/host/*.py "$REPO"/host/*.xml "$SCRIPTS_DST/"
+chmod +x "$SCRIPTS_DST"/*.sh "$SCRIPTS_DST"/*.py 2>/dev/null || true
+
+# 4. uhubctl sudoers (the watcher cuts Vbus via `sudo -n uhubctl`)
+UHUBCTL="$(command -v uhubctl || echo /usr/sbin/uhubctl)"
+say "installing /etc/sudoers.d/uhubctl ($RUN_USER NOPASSWD: $UHUBCTL)"
+echo "$RUN_USER ALL=(root) NOPASSWD: $UHUBCTL" | sudo tee /etc/sudoers.d/uhubctl >/dev/null
+sudo chmod 0440 /etc/sudoers.d/uhubctl
+sudo visudo -cf /etc/sudoers.d/uhubctl >/dev/null || { sudo rm -f /etc/sudoers.d/uhubctl; die "bad sudoers"; }
+
+# 5. systemd services (paths/user injected from the templates -- no hard-coding)
+say "installing systemd services"
+for svc in gopro-manager gopro-autorevive; do
+    sed -e "s#__GOPRO_SCRIPTS__#$SCRIPTS_DST#g" \
+        -e "s#__USER__#$RUN_USER#g" \
+        -e "s#__HOME__#$USER_HOME#g" \
+        "$REPO/host/systemd/$svc.service.in" | sudo tee "/etc/systemd/system/$svc.service" >/dev/null
+done
+sudo systemctl daemon-reload
+sudo systemctl enable --now gopro-manager.service gopro-autorevive.service
+
+say "done. The cameras now arm on every boot."
+echo "    operator menu : $SCRIPTS_DST/gopro.sh"
+echo "    manager logs  : $SCRIPTS_DST/manager_log.sh"
+echo "    remove        : $REPO/uninstall.sh"

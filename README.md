@@ -27,26 +27,28 @@ The manager has **no USB-power privileges** (it can't corrupt anything); the
 only component that touches Vbus is the host watcher, and only on a camera
 confirmed off the bus.
 
+The repo is laid out to mirror the deployment, so `install.sh` just drops each
+half in place (ROS packages -> the workspace, host scripts -> `gopro_scripts/`):
+
 ```
-gopro_control/gopro_control/
-  core/            # ROS-independent engine (urllib only, no extra deps)
-    camera.py      # GoPro class: discovery, state, control
-    settings.py    # Open GoPro setting maps + validation + ordered apply
-    cli.py         # dev CLI for live testing without ROS
-  nodes/
-    gopro_manager_node.py   # the manager node
-    pi_menu_node.py         # the recording console
-scripts/           # host-side operation (run on the Pi)
+install.sh / uninstall.sh   # one-command add/remove on any base-image Pi
+ros2_pkgs/                  # the ROS half -> built in the cosma_auv container
+  gopro_control/gopro_control/
+    core/          # ROS-independent engine (urllib only, no extra deps)
+      camera.py    # GoPro class: discovery, state, control
+      settings.py  # Open GoPro setting maps + validation + ordered apply
+      cli.py       # dev CLI for live testing without ROS
+    nodes/
+      gopro_manager_node.py   # the manager node
+      pi_menu_node.py         # the recording console
+  gopro_msgs/      # GoProStatus.msg, GoProSystem.msg, GoProSettings.srv
+host/                        # the HOST half -> installed into gopro_scripts/
   gopro.sh                  # unified operator menu (entry point): record / offload / wipe / manager
   manager_up.sh / manager_down.sh / manager_log.sh / menu.sh
-  revive.sh                 # one-shot or --watch auto-revive
+  revive.sh                 # one-shot or --watch auto-revive (uses host uhubctl)
   gopro_download.py         # offload footage -> SSD (robust, resumable, live progress)
   gopro_delete.py           # delete / wipe media on the cameras
-  mp4meta.py                # MP4 start time + GPMF/IMU stream detection (no ffmpeg)
-  gopro_bench.py            # transfer-speed diagnostic
-  gopro-manager.service / gopro-autorevive.service   # systemd boot units
-  install_service.sh        # installs+enables both boot services (run once)
-gopro_msgs/        # GoProStatus.msg, GoProSystem.msg, GoProSettings.srv
+  systemd/                  # gopro-manager / gopro-autorevive service TEMPLATES (paths filled in at install)
 tests/             # automated ROS-interface test suite
 ```
 
@@ -100,14 +102,15 @@ tests/             # automated ROS-interface test suite
 
 ## Operating
 
-One-time setup installs the boot services, so the manager + watcher start
-automatically on power-up and the cameras arm themselves — no manual step:
+One-time setup builds the packages, installs the host scripts + boot services,
+so the manager + watcher start automatically on power-up and the cameras arm
+themselves — no manual step:
 
 ```bash
-./install_service.sh     # installs+enables gopro-manager + gopro-autorevive
+./install.sh             # build + host scripts + sudoers + boot services (idempotent)
 ```
 
-`./gopro.sh` is then the single operator entry point (run on the Pi):
+`gopro_scripts/gopro.sh` is then the single operator entry point (run on the Pi):
 
 ```
 === AUV GoPro ===  (manager: UP | SSD: mounted)
@@ -154,22 +157,30 @@ on the next manager restart.
 
 ---
 
-## Build / deploy
+## Install on another Pi
 
-ROS 2 Humble is provided by the `cosma_auv` Docker image (not on the host).
-Copy the two packages into the workspace and build only them:
+The GoPro rig is a **self-contained add-on**: it adds two ROS packages and a
+`gopro_scripts/` folder, modifies **no** existing AUV package, and needs **no
+Docker image change** (the ROS code is built into the mounted workspace, not
+baked into the image). So any Pi that already has the base AUV setup (the
+`cosma_auv` image + the `swarm-vehicle` workspace) gets the cameras with:
 
 ```bash
-# packages live in ~/dev/swarm-vehicle/ros2_ws/src/  (next to auv, auv_msgs, ...)
-docker run --rm -v ~/dev/swarm-vehicle:/home/cosma_auv/swarm-vehicle \
-  --entrypoint bash cosma_auv:latest -lc \
-  "source /opt/ros/humble/setup.bash && cd /home/cosma_auv/swarm-vehicle/ros2_ws && \
-   colcon build --packages-select gopro_msgs gopro_control"
+git clone <repo> && cd gopro_manager_pi
+./install.sh                       # detects the workspace; build + scripts + services
+# non-default locations:
+GOPRO_WS=/path/to/swarm-vehicle COSMA_IMAGE=myimg:tag ./install.sh
+./uninstall.sh                     # remove (footage is never touched; --purge also drops packages)
 ```
 
-The host watcher needs passwordless `uhubctl`
-(`/etc/sudoers.d/uhubctl` → `<user> ALL=(root) NOPASSWD: /usr/sbin/uhubctl`).
-`install_service.sh` now installs this rule automatically.
+`install.sh` is idempotent (re-run to update) and does, on the target Pi:
+1. copy `ros2_pkgs/gopro_control` + `gopro_msgs` into `<ws>/ros2_ws/src/`;
+2. `colcon build` them inside the `cosma_auv` container (ROS 2 Humble lives only
+   in the image, not on the host);
+3. install the `host/` scripts into `<ws>/gopro_scripts/`;
+4. install the `uhubctl` sudoers rule (the watcher cuts Vbus via `sudo -n uhubctl`);
+5. install + enable the two systemd services (paths/user injected from the
+   `host/systemd/*.in` templates — nothing is hard-coded to one Pi).
 
 The manager + menu containers use `--network host -e ROS_DOMAIN_ID=0
 -e ROS_LOCALHOST_ONLY=1` plus a FastDDS UDP-only profile
