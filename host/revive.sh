@@ -19,12 +19,12 @@
 #   ./revive.sh --watch    loop forever, auto-revive (run as a systemd service)
 set -u
 REF="$(cd "$(dirname "$0")" && pwd)/.gopro_ref"     # lines: "hub:port" (expected GoPro sockets)
-UHUBCTL=/usr/sbin/uhubctl
+UHUBCTL=$(command -v uhubctl 2>/dev/null || echo /usr/sbin/uhubctl)   # resolve where uhubctl really is (must match the /etc/sudoers.d/uhubctl path install.sh grants)
 EXPECTED=${GOPRO_COUNT:-2}    # number of GoPro sockets on the rig
 CONFIRM=3                     # consecutive scans a port must be empty before we act
 SCAN=2                        # [s] between scans  (CONFIRM*SCAN = confirmation window)
 REQ="$(cd "$(dirname "$0")" && pwd)/.revive_request"   # manager writes "hub:port" here for a targeted Vbus cycle (on-bus capture-dead cam)
-REQ_OFF=15                    # [s] Vbus OFF for a requested cycle (a capture-dead/black-but-lit cam needs a long cut, not the 4s of an off-bus blip)
+REQ_OFF=15                    # [s] Vbus OFF for a requested cycle (a capture-dead/black-but-lit cam needs a long cut, not the 8s of an off-bus blip)
 BOOT_SETTLE=30                # [s] after ANY cycle, ignore that socket's emptiness this long (it is booting/enumerating) -> never re-cut a camera mid-boot
 BOOT_SCANS=$(( (BOOT_SETTLE + SCAN - 1) / SCAN ))   # the above expressed in scan ticks
 
@@ -114,17 +114,17 @@ fi
 
 # --- one-shot (manual): confirm twice before cutting ------------------------
 mapfile -t miss1 < <(missing_ports)
-echo ">>> sockets vides (1er scan) : ${miss1[*]:-aucun}"
-{ [[ ${#miss1[@]} -eq 0 || -z ${miss1[0]:-} ]]; } && { echo ">>> rien à réveiller."; exit 0; }
-echo ">>> re-vérification dans 2s (on ne coupe que si TOUJOURS vide)..."
+echo ">>> empty sockets (1st scan): ${miss1[*]:-none}"
+{ [[ ${#miss1[@]} -eq 0 || -z ${miss1[0]:-} ]]; } && { echo ">>> nothing to revive."; exit 0; }
+echo ">>> re-checking in 2s (only cut if STILL empty)..."
 sleep 2
 mapfile -t miss2 < <(missing_ports)
 for hp in "${miss1[@]}"; do
     [[ -z $hp ]] && continue
     if printf '%s\n' "${miss2[@]}" | grep -qxF "$hp"; then
-        echo "  $hp confirmé vide -> power-cycle hub ${hp%:*} port ${hp#*:}"; cycle_port "$hp"
+        echo "  $hp confirmed empty -> power-cycle hub ${hp%:*} port ${hp#*:}"; cycle_port "$hp"
     else
-        echo "  $hp revenu entre-temps -> on NE touche pas."
+        echo "  $hp came back meanwhile -> NOT touching it."
     fi
 done
-echo ">>> attends ~10s ; le manager ré-arme la cam tout seul (re-scan)."
+echo ">>> wait ~10s; the manager re-arms the camera on its own (re-scan)."

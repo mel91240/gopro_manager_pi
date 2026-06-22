@@ -12,7 +12,7 @@ file is downloaded with:
   * byte-level RESUME via HTTP Range: an interrupted file keeps its <name>.part
     and continues where it left off (across retries AND across whole re-runs).
 
-PARALLEL across cameras: benchmarking (gopro_bench.py) showed that when BOTH
+PARALLEL across cameras: benchmarking showed that when BOTH
 cameras sit on USB3 the two downloads run at full speed at once (~77 MB/s
 aggregate). But with a mixed USB2+USB3 wiring the USB2 camera collapses to
 ~1.4 MB/s under contention. So the default is AUTO: parallel only when every

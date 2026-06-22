@@ -161,9 +161,9 @@ themselves — no manual step:
 `gopro_scripts/gopro.sh` is then the single operator entry point (run on the Pi):
 
 ```
-=== AUV GoPro ===  (manager: UP | SSD: mounted)
+=== AUV GoPro ===  (SSD: mounted)
   [1] Recording (record / stop / settings)    -> the ROS console
-  [2] Copy footage -> SSD                      -> live %/speed/ETA
+  [2] Copy videos -> SSD                       -> live %/speed/ETA
   [3] Delete / wipe the cards
   [4] Start / stop the manager
   [5] Inspect / verify SSD                     -> what's copied + completeness check

@@ -16,9 +16,9 @@ installs these scripts into `gopro_scripts/`, and enables the two boot services
 ./gopro.sh
 ```
 ```
-=== AUV GoPro ===  (manager: UP | SSD: mounted)
+=== AUV GoPro ===  (SSD: mounted)
   [1] Recording (record / stop / settings)
-  [2] Copy footage -> SSD       (live %/speed/ETA, 'q' to cancel)
+  [2] Copy videos -> SSD        (live %/speed/ETA, 'q' to cancel)
   [3] Delete / wipe the cards
   [4] Start / stop the manager
   [5] Inspect / verify SSD       (what's copied + completeness check)

@@ -10,6 +10,7 @@
 #   [2] Download -> SSD   -> gopro_download.py (live %/speed/ETA)
 #   [3] Delete media      -> gopro_delete.py   (live %/freed)
 #   [4] Manager up/down   -> arm / disarm the cameras
+#   [5] Inspect / verify  -> what's on the SSD + completeness check vs the cameras
 set -u
 DIR="$(cd "$(dirname "$0")" && pwd)"
 SSD_DEV="${SSD_DEV:-}"            # empty = auto-detect; override with SSD_DEV=/dev/sdXN

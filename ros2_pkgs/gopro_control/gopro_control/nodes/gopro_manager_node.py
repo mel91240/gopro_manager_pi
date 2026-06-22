@@ -44,7 +44,7 @@ class GoProManagerNode(Node):
         super().__init__('gopro_manager')
 
         # --- Parameters --------------------------------------------------
-        self.declare_parameter('camera_labels', ['LEFT', 'RIGHT'])   # 1st label -> 1st USB socket by (hub,port) order: port2(.185)=LEFT, port4(.575)=RIGHT
+        self.declare_parameter('camera_labels', ['LEFT', 'RIGHT'])   # 1st label -> 1st USB socket in (hub,port) order: hub port 2 = LEFT, hub port 4 = RIGHT (this rig's wiring; serials end ...185 / ...575)
         self.declare_parameter('tick_period', 1.0)                   # status publish + watchdog period [s]
         self.declare_parameter('strikes_before_restart', 2)          # consecutive bad checks before acting
         self.declare_parameter('fault_after_attempts', 2)            # failed recovery attempts on a recovering cam before escalating DEGRADED -> FAULT

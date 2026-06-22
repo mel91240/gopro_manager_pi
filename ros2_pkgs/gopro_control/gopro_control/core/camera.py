@@ -33,13 +33,11 @@ UHUBCTL = "/usr/sbin/uhubctl"
 HTTP_PORT = 8080
 
 # Open GoPro status field IDs (from /gopro/camera/state -> "status")
-ST_BATTERY_PRESENT = "1"
 ST_BUSY = "8"
 ST_ENCODING = "10"
 ST_SD = "33"            # 0=OK 1=full 2=removed 3=needs-format 4=busy
 ST_REMAINING_PHOTOS = "34"
 ST_REMAINING_SEC = "35"  # remaining video seconds -- the RELIABLE "card usable" signal
-ST_SPACE_KB = "54"
 
 PRESET_GROUP_VIDEO = 1000
 AUTO_POWER_OFF = 59          # Open GoPro setting id (Hero 12): Auto Power Off
