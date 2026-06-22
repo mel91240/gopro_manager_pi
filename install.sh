@@ -37,6 +37,12 @@ echo "    user      : $RUN_USER"
 [ -d "$GOPRO_WS/ros2_ws" ] || die "no ros2_ws under $GOPRO_WS -- is this the AUV workspace? (set GOPRO_WS=)"
 command -v docker >/dev/null || die "docker not found"
 docker image inspect "$IMAGE" >/dev/null 2>&1 || die "docker image '$IMAGE' not found (set COSMA_IMAGE=)"
+if ! command -v uhubctl >/dev/null && [ ! -x /usr/sbin/uhubctl ]; then
+    echo "!!! WARNING: uhubctl not found -- the auto-revive watcher cannot power-cycle"
+    echo "    a camera that falls off the USB bus until it is installed"
+    echo "    (sudo apt install uhubctl). The manager + recording still work without it;"
+    echo "    only off-bus camera recovery needs it. Continuing..."
+fi
 
 # 1. ROS packages -> workspace src (replace cleanly so no stale files linger)
 say "copying ROS packages into $WS_SRC"
