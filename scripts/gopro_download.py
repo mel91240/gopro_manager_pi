@@ -353,6 +353,25 @@ def _download_one(ip, label, f, dest, lock, c, progress=None):
         _emit(f"  [{label}] FAIL  {name}: {e}  (.part kept for resume)")
 
 
+def guard_dest_mounted(dest):
+    """Refuse to write into an unmounted external-mount directory (e.g. /mnt/ssd
+    when the SSD failed to mount). That dir then lives on the Pi's small root
+    filesystem, so a multi-GB offload would silently fill the rootfs (and on this
+    rig /mnt/ssd is a whole Jetson rootfs). Only enforced for conventional mount
+    roots (/mnt, /media); a home-directory dest stays unrestricted. gopro.sh does
+    this via ensure_dest(), but the downloader can be invoked directly too."""
+    p = os.path.abspath(dest)
+    for root in ("/mnt", "/media"):
+        if p == root or p.startswith(root + os.sep):
+            rest = p[len(root) + 1:]
+            mp = os.path.join(root, rest.split(os.sep)[0]) if rest else root
+            if not os.path.ismount(mp):
+                sys.exit(f"!!! refusing to download to {dest}: {mp} is NOT mounted "
+                         f"-- this would fill the Pi's root filesystem. Mount it first "
+                         f"(gopro.sh does this automatically), or pass a different --dest.")
+            return
+
+
 def download_all(jobs, dest, lock=None, counters=None, parallel=False):
     """jobs = [(label, ip, [file,...]), ...]. Returns the counters dict.
 
@@ -512,6 +531,7 @@ def main():
         mode += " (auto)"
     if args.maxrate > 0:
         mode += f", capped {args.maxrate:g} MB/s"
+    guard_dest_mounted(args.dest)   # never silently fill the Pi root if the SSD isn't mounted
     print(f">>> downloading {total} clip(s) from {len(jobs)} camera(s) [{mode}] -> {args.dest}")
     t0 = time.time()
     c = download_all(jobs, args.dest, parallel=parallel)
