@@ -52,7 +52,7 @@ def delete_file(ip, f, retries=3):
     for _ in range(retries):
         try:
             with urlopen(url, timeout=15) as r:
-                if r.getcode() == 200:
+                if 200 <= r.getcode() < 300:      # 200 OR 204 No Content (firmware-dependent) = deleted
                     return True
                 last = f"HTTP {r.getcode()}"
         except Exception as e:
