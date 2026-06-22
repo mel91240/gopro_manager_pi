@@ -72,6 +72,13 @@ class GoProManagerNode(Node):
         self.vbus_cooldown = float(self.get_parameter('vbus_cooldown').value)
         self.vbus_request_file = str(self.get_parameter('vbus_request_file').value)
 
+        # The Vbus-request and recording-intent files MUST land in a directory the
+        # host watcher (revive.sh) also sees (a bind mount). If that directory is
+        # missing/read-only the write silently throws and BOTH the brown-out Vbus
+        # recovery and the resume-after-reboot would be dead with no symptom. Verify
+        # it loudly at startup so the operator knows before diving.
+        self._verify_handoff_dir()
+
         # --- State -------------------------------------------------------
         self.cameras = []
         self.recording = False
@@ -261,6 +268,24 @@ class GoProManagerNode(Node):
     # =====================================================================
     # Persistent recording intent (survives a reboot)
     # =====================================================================
+    def _verify_handoff_dir(self):
+        """Ensure the directory shared with the host watcher exists and is writable.
+        Both the Vbus request file and the recording-intent file live here; a missing
+        or read-only dir silently disables Vbus recovery AND resume-after-reboot."""
+        for path in (self.vbus_request_file, self.state_file):
+            d = os.path.dirname(path) or '.'
+            try:
+                os.makedirs(d, exist_ok=True)
+            except OSError as e:
+                self.get_logger().error(
+                    f'Hand-off dir {d} could not be created ({e}); Vbus recovery and '
+                    f'resume-after-reboot are DISABLED. Check the container bind mount.')
+                continue
+            if not os.access(d, os.W_OK):
+                self.get_logger().error(
+                    f'Hand-off dir {d} is not writable; Vbus recovery and '
+                    f'resume-after-reboot are DISABLED. Check the container bind mount.')
+
     def _set_intent(self, recording: bool):
         """Persist whether a mission recording is in progress, so that after a Pi
         reboot the manager knows to resume filming (vs stay idle)."""
@@ -564,15 +589,20 @@ class GoProManagerNode(Node):
         """Ask the host watcher (revive.sh) to Vbus power-cycle this camera's
         socket -- the only fix for a reachable-but-capture-dead (brown-out) cam.
         Written to a file the host watcher polls; the manager has no Vbus itself."""
-        self._vbus_cooldown_until[cam.label] = now + self.vbus_cooldown
         try:
             with open(self.vbus_request_file, 'w') as f:
                 f.write(f'{cam.hub}:{cam.port}\n')
-            self.get_logger().warn(
-                f'[{cam.label}] capture-dead (brown-out) -> requested host Vbus '
-                f'power-cycle of socket {cam.hub}:{cam.port}.')
         except OSError as e:
+            # Do NOT advance the cooldown: the request never reached the watcher, so
+            # the next tick should retry rather than back off for vbus_cooldown.
             self.get_logger().error(f'[{cam.label}] could not write Vbus request: {e}')
+            return
+        # Only now that the request is on disk do we start the cooldown (cycle +
+        # cold-boot + re-arm take ~vbus_cooldown s; don't spam the watcher meanwhile).
+        self._vbus_cooldown_until[cam.label] = now + self.vbus_cooldown
+        self.get_logger().warn(
+            f'[{cam.label}] capture-dead (brown-out) -> requested host Vbus '
+            f'power-cycle of socket {cam.hub}:{cam.port}.')
 
     # =====================================================================
     # Snapshot + publish
