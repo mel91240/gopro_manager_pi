@@ -86,6 +86,7 @@ class GoProManagerNode(Node):
         self.recording = False
         self.state = GoProSystem.STATE_INITIALIZING
         self.message = 'starting up'
+        self._last_state = None     # last state we LOGGED, so a transition is logged once (not every tick)
         self._strikes = {}
         self._grace_until = {}
         self._record_grace_until = 0.0   # post-(re)start encoder-init window; suppresses the all-lost emergency ONLY during a legitimate start, not a per-camera recovery
@@ -435,10 +436,17 @@ class GoProManagerNode(Node):
             self._recovering.clear()      # mission ended -- stop chasing dropped cams
             self._recover_attempts.clear()
             self._faulted.clear()
+            confirmed = [lbl for lbl, ok in results.items() if ok]
             failed = [lbl for lbl, ok in results.items() if not ok]
             success = not failed
-            msg = ('Recording STOPPED on all cameras.' if success
-                   else f'STOPPED; {failed} did not confirm (likely disconnected).')
+            # A requested stop ("STOP requested") is distinct from a drop the
+            # watchdog detects ("LOST"/"STOPPED FILMING"). Always spell out which
+            # cameras actually confirmed they stopped, and which did not.
+            if success:
+                msg = f'STOP requested -- all cameras confirmed stopped: {confirmed}.'
+            else:
+                msg = (f'STOP requested -- confirmed stopped: {confirmed}; '
+                       f'NOT confirmed: {failed} (unreachable -- may still be filming).')
 
         self._publish(self._snapshot())          # push the new state immediately (no lag)
         return self._reply(response, success, msg)
@@ -512,8 +520,19 @@ class GoProManagerNode(Node):
                 self._strikes[cam.label] += 1
                 self._recovering.setdefault(cam.label, now)
                 if self._strikes[cam.label] == 1:
-                    self.get_logger().warn(
-                        f'[{cam.label}] stopped recording (reachable={h["reachable"]}) -- recovering.')
+                    # Two very different situations -- keep the wording unambiguous:
+                    #  - unreachable: we cannot even talk to it, so we do NOT know
+                    #    whether it is still filming; "LOST" (a drop we must chase).
+                    #  - reachable but not recording: it answers and confirms it is
+                    #    NOT filming; "STOPPED FILMING" (a known encoder stop).
+                    if not h['reachable']:
+                        self.get_logger().warn(
+                            f'[{cam.label}] LOST -- no USB response, cannot confirm it is still '
+                            f'filming. Recovering...')
+                    else:
+                        self.get_logger().warn(
+                            f'[{cam.label}] STOPPED FILMING -- reachable but not recording. '
+                            f'Recovering...')
                 if (self._strikes[cam.label] >= self.strikes_max
                         and now >= self._cooldown_until[cam.label]):
                     self._recover(cam, now)
@@ -687,6 +706,21 @@ class GoProManagerNode(Node):
         else:
             self.state = GoProSystem.STATE_INITIALIZING
             self.message = f'{len(self._ready)}/{n} cameras ready'
+
+        # Mirror the machine signal (the ~/system topic, read by the nav) onto the
+        # HUMAN channel (the logs): whoever reviews journalctl at the surface MUST
+        # see the single most important event -- entering or leaving EMERGENCY.
+        # Logged only on a state CHANGE, so it never spams every tick.
+        if self.state != self._last_state:
+            if self.state == GoProSystem.STATE_FAULT:
+                self.get_logger().error(f'*** EMERGENCY (MISSION COMPROMISED) *** {self.message}')
+            elif self.state == GoProSystem.STATE_DEGRADED:
+                self.get_logger().warn(f'DEGRADED -- {self.message}')
+            elif self.state == GoProSystem.STATE_RECORDING:
+                self.get_logger().info(f'state -> RECORDING (emergency cleared if any): {self.message}')
+            elif self.state == GoProSystem.STATE_READY:
+                self.get_logger().info(f'state -> READY: {self.message}')
+            self._last_state = self.state
 
         self.system_pub.publish(GoProSystem(
             state=self.state, message=self.message, recording=self.recording,
