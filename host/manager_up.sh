@@ -19,7 +19,7 @@ NAME=gopro_manager
 # to own, so we always (re)claim the container ourselves.
 docker rm -f "$NAME" >/dev/null 2>&1 || true
 
-echo ">>> Starting GoPro manager in the foreground (arming cameras)..." >&2
+echo "manager started" >&2
 # DDS transport: force UDP-only via fastdds_udp_only.xml (no --ipc host). Across
 # containers, FastDDS otherwise picks shared-memory (same host) but each
 # container has a private /dev/shm, so the menu/autonomy discover the topics yet
@@ -35,6 +35,7 @@ exec docker run --name "$NAME" \
     --network host \
     -e ROS_DOMAIN_ID=0 -e ROS_LOCALHOST_ONLY=1 \
     -e FASTRTPS_DEFAULT_PROFILES_FILE=/home/cosma_auv/swarm-vehicle/gopro_scripts/fastdds_udp_only.xml \
+    -e RCUTILS_CONSOLE_OUTPUT_FORMAT='{message}' -e RCUTILS_COLORIZED_OUTPUT=0 \
     -v "$WS":/home/cosma_auv/swarm-vehicle \
     --entrypoint bash "$IMAGE" -lc '
         source /opt/ros/humble/setup.bash &&

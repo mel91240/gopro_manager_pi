@@ -13,6 +13,7 @@ Wants=docker.service
 Type=simple
 Restart=on-failure
 RestartSec=3
+SyslogIdentifier=gopro
 User=__USER__
 Environment=HOME=__HOME__
 # Paths filled in by install.sh (sed on __GOPRO_SCRIPTS__) -- never hard-coded.

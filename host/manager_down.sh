@@ -4,6 +4,6 @@
 # an in-progress recording; it only drops remote control until brought back up.
 # The auto-revive watcher (gopro-autorevive.service) is left running on purpose.
 set -e
-echo ">>> Stopping GoPro manager..."
-docker rm -f gopro_manager >/dev/null 2>&1 && echo ">>> Manager stopped." \
-    || echo ">>> Manager was not running."
+echo "manager stopping"
+docker rm -f gopro_manager >/dev/null 2>&1 && echo "manager stopped" \
+    || echo "manager not running"

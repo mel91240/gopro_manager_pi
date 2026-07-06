@@ -71,13 +71,18 @@ cycle_port_long() { local h=${1%:*} p=${1#*:}; sudo -n "$UHUBCTL" -l "$h" -p "$p
 # logic does not catch this case (the dead camera is still enumerated).
 handle_request() {
     [[ -s $REQ ]] || return 0
-    local target; target=$(head -n1 "$REQ" | tr -d '[:space:]')
+    local line; line=$(head -n1 "$REQ")
     : > "$REQ"                                   # consume immediately: one cycle per request
+    local target label
+    target=$(awk '{print $1}' <<<"$line")        # "hub:port"
+    label=$(awk '{print $2}' <<<"$line")         # optional "LEFT"/"RIGHT" (the manager tags it)
+    [[ -n $label ]] && label="[$label]" || label="[autorevive]"
     if [[ ! $target =~ ^[^:]+:[0-9]+$ ]]; then
-        echo "[autorevive] bad Vbus request '$target' -- ignored"; return 0
+        echo "$label bad Vbus request '$line' -- ignored"; return 0
     fi
-    echo "[autorevive] manager requested Vbus power-cycle of $target (on-bus capture-dead) -> cutting ${REQ_OFF}s"
+    echo "$label cutting Vbus ${REQ_OFF}s (power-cycle)"
     cycle_port_long "$target"
+    echo "$label power-cycle done -- re-arming"
     CYCLED_PORT=$target          # tell the watch loop to let this socket boot (don't re-cut it)
 }
 

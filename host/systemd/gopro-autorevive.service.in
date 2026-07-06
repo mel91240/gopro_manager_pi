@@ -5,6 +5,7 @@ Wants=docker.service
 
 [Service]
 Type=simple
+SyslogIdentifier=revive
 User=__USER__
 # Paths filled in by install.sh (sed on __GOPRO_SCRIPTS__) -- never hard-coded.
 ExecStart=/usr/bin/stdbuf -oL __GOPRO_SCRIPTS__/revive.sh --watch

@@ -86,7 +86,7 @@ class GoProManagerNode(Node):
         self.recording = False
         self.state = GoProSystem.STATE_INITIALIZING
         self.message = 'starting up'
-        self._last_state = None     # last state we LOGGED, so a transition is logged once (not every tick)
+        self._emergency_logged = set()  # labels already logged as EMERGENCY this episode (log once, not every tick)
         self._strikes = {}
         self._grace_until = {}
         self._record_grace_until = 0.0   # post-(re)start encoder-init window; suppresses the all-lost emergency ONLY during a legitimate start, not a per-camera recovery
@@ -127,8 +127,7 @@ class GoProManagerNode(Node):
             self._set_cameras(cams)
             if cams:
                 for cam in cams:
-                    self.get_logger().info(f'Found {cam!r}')
-                self.get_logger().info(f'Discovered {len(cams)}/{self.expected} camera(s).')
+                    self.get_logger().info(f'[{cam.label}] found')
         if not self.cameras:
             return                                  # USB not up yet -- keep scanning
         if self._first_seen is None:
@@ -215,7 +214,7 @@ class GoProManagerNode(Node):
                     # immediately (premature Vbus request / FAULT on a routine USB
                     # re-enum).
                     self._grace_until[cam.label] = time.monotonic() + self.grace_period
-                    self.get_logger().info(f'Camera appeared on the bus: {cam!r}')
+                    self.get_logger().info(f'[{cam.label}] found')
             return
 
         # --- idle: reconcile to exactly what is on the bus (label == socket) ---
@@ -223,7 +222,7 @@ class GoProManagerNode(Node):
         present = {c.label for c in found}
         for cam in self.cameras:                    # forget sockets that left
             if cam.label not in present:
-                self.get_logger().info(f'[{cam.label}] left the bus ({cam.ip}) -- forgetting it.')
+                self.get_logger().info(f'[{cam.label}] unplugged')
                 self._forget(cam)
                 dirty = True
         old_ip = {c.label: c.ip for c in self.cameras}
@@ -233,13 +232,13 @@ class GoProManagerNode(Node):
             self._track(cam)
             if old_ip.get(cam.label) != cam.ip:     # new socket or a swapped-in unit
                 self._ready.discard(cam.label)
-                self.get_logger().info(f'{cam!r} -- new/swapped camera, arming.')
+                self.get_logger().info(f'[{cam.label}] found')
                 dirty = True
             up = cam.reachable(timeout=1)
             if cam.label in self._ready:
                 if not up:                          # a ready camera fell off the bus
                     self._ready.discard(cam.label)
-                    self.get_logger().warn(f'[{cam.label}] dropped off the bus -- will re-arm when back.')
+                    self.get_logger().warn(f'[{cam.label}] unplugged')
                     dirty = True
                     continue
                 # Reachable and believed READY -- but a brief unplug/replug (same IP,
@@ -252,8 +251,7 @@ class GoProManagerNode(Node):
                 if cam.enable_wired_control():
                     continue
                 self._ready.discard(cam.label)
-                self.get_logger().warn(
-                    f'[{cam.label}] lost wired control (fell back to USB/MTP?) -- re-arming.')
+                self.get_logger().warn(f'[{cam.label}] re-arming (lost wired ctrl)')
                 dirty = True
                 # fall through to the re-arm path below
             if not up or now < self._cooldown_until.get(cam.label, 0.0):
@@ -268,9 +266,8 @@ class GoProManagerNode(Node):
         if len(self.cameras) < self.expected:
             self.get_logger().warn(
                 f'Only {len(self.cameras)}/{self.expected} camera(s) found -- arming those.')
-        self.get_logger().info('Arming cameras...')
         if not system_clock_synced():
-            self.get_logger().warn('Pi clock not NTP-synced yet; camera time will be set at record time.')
+            self.get_logger().warn('clock not synced (camera time set at record)')
         for cam in self.cameras:
             self._arm(cam)
         if self.recording:
@@ -386,7 +383,7 @@ class GoProManagerNode(Node):
         if ready:
             self._ready.add(cam.label)
             self._faulted.pop(cam.label, None)
-            self.get_logger().info(f'[{cam.label}] armed & verified.')
+            self.get_logger().info(f'[{cam.label}] armed')
         else:
             self._ready.discard(cam.label)
             self.get_logger().warn(f'[{cam.label}] NOT ready (init={ok}). SD formatted / cable ok?')
@@ -434,13 +431,13 @@ class GoProManagerNode(Node):
                 self._grace_until[c.label] = grace
                 self._cooldown_until[c.label] = 0.0
 
-            if len(started) == n:
-                msg, success = f'Recording STARTED on all {n} cameras.', True
-            elif started:
-                failed = [lbl for lbl, ok in results.items() if not ok]
-                msg, success = f'STARTED, but {failed} failed (watchdog will retry).', True
-            else:
-                msg, success = 'FAILED to start recording on any camera.', False
+            for lbl in started:
+                self.get_logger().info(f'[{lbl}] recording')
+            for lbl in [l for l, ok in results.items() if not ok]:
+                self.get_logger().warn(f'[{lbl}] failed to start (watchdog will retry)')
+            success = len(started) > 0
+            msg = (f'Recording started on {started}.' if success
+                   else 'Failed to start recording on any camera.')
         else:
             if not self.recording:
                 self.get_logger().warn('Stop requested but state says not recording -- sending stop anyway.')
@@ -453,14 +450,12 @@ class GoProManagerNode(Node):
             confirmed = [lbl for lbl, ok in results.items() if ok]
             failed = [lbl for lbl, ok in results.items() if not ok]
             success = not failed
-            # A requested stop ("STOP requested") is distinct from a drop the
-            # watchdog detects ("LOST"/"STOPPED FILMING"). Always spell out which
-            # cameras actually confirmed they stopped, and which did not.
-            if success:
-                msg = f'STOP requested -- all cameras confirmed stopped: {confirmed}.'
-            else:
-                msg = (f'STOP requested -- confirmed stopped: {confirmed}; '
-                       f'NOT confirmed: {failed} (unreachable -- may still be filming).')
+            for lbl in confirmed:
+                self.get_logger().info(f'[{lbl}] stopped recording')
+            for lbl in failed:
+                self.get_logger().error(f'[{lbl}] stop failed -- not confirmed (may still be filming)')
+            msg = ('Recording stopped.' if success
+                   else f'Stop not confirmed on {failed}.')
 
         self._publish(self._snapshot())          # push the new state immediately (no lag)
         return self._reply(response, success, msg)
@@ -498,12 +493,11 @@ class GoProManagerNode(Node):
         return self._reply(response, all_ok, msg)
 
     def _reply(self, response, success, message):
+        # RPC feedback for the menu ONLY -- deliberately not logged: journalctl
+        # carries the per-camera event lines ([LEFT] recording, ...) instead, so the
+        # service reply is never duplicated as an aggregate line.
         response.success = success
         response.message = message
-        if success:                              # separate call sites: rclpy forbids
-            self.get_logger().info(message)      # changing a logger's severity at the
-        else:                                    # same line between calls
-            self.get_logger().warn(message)
         return response
 
     # =====================================================================
@@ -526,7 +520,7 @@ class GoProManagerNode(Node):
                     # recovering state but reset the clock so we do NOT raise a
                     # false emergency while it is making progress.
                     if cam.label not in self._recovering:
-                        self.get_logger().warn(f'[{cam.label}] busy (recovering file?) -- waiting.')
+                        self.get_logger().warn(f'[{cam.label}] recovering (finishing file)')
                     self._recovering[cam.label] = now
                     continue
                 # Camera dropped out of recording. Flag it right away (so the
@@ -534,19 +528,12 @@ class GoProManagerNode(Node):
                 self._strikes[cam.label] += 1
                 self._recovering.setdefault(cam.label, now)
                 if self._strikes[cam.label] == 1:
-                    # Two very different situations -- keep the wording unambiguous:
-                    #  - unreachable: we cannot even talk to it, so we do NOT know
-                    #    whether it is still filming; "LOST" (a drop we must chase).
-                    #  - reachable but not recording: it answers and confirms it is
-                    #    NOT filming; "STOPPED FILMING" (a known encoder stop).
+                    # Distinct verbs: "lost" = no USB answer (cannot confirm filming);
+                    # "stopped filming" = answers but not encoding.
                     if not h['reachable']:
-                        self.get_logger().warn(
-                            f'[{cam.label}] LOST -- no USB response, cannot confirm it is still '
-                            f'filming. Recovering...')
+                        self.get_logger().warn(f'[{cam.label}] lost')
                     else:
-                        self.get_logger().warn(
-                            f'[{cam.label}] STOPPED FILMING -- reachable but not recording. '
-                            f'Recovering...')
+                        self.get_logger().warn(f'[{cam.label}] stopped filming')
                 if (self._strikes[cam.label] >= self.strikes_max
                         and now >= self._cooldown_until[cam.label]):
                     self._recover(cam, now)
@@ -555,7 +542,7 @@ class GoProManagerNode(Node):
     def _mark_healthy(self, cam):
         """Camera is recording again -- clear any drop/fault bookkeeping."""
         if cam.label in self._recovering or cam.label in self._faulted:
-            self.get_logger().info(f'[{cam.label}] recording recovered.')
+            self.get_logger().info(f'[{cam.label}] recovered')
         self._recovering.pop(cam.label, None)
         self._faulted.pop(cam.label, None)
         self._recover_attempts.pop(cam.label, None)
@@ -585,7 +572,7 @@ class GoProManagerNode(Node):
         self._cooldown_until[cam.label] = now + self.restart_cooldown
         self._recover_attempts[cam.label] = self._recover_attempts.get(cam.label, 0) + 1
         if not cam.reachable(timeout=2):
-            self.get_logger().warn(f'[{cam.label}] still disconnected -- will keep retrying.')
+            self.get_logger().warn(f'[{cam.label}] recovering')
             return
         if cam.recording_now():
             # It is actually recording already (a previous start finally took, or a
@@ -601,17 +588,15 @@ class GoProManagerNode(Node):
             # stays raised (via _faulted) so autonomy still sees MISSION COMPROMISED;
             # once the card is emptied the re-arm clears the fault -> READY, and the
             # operator restarts manually with [1].
-            self._faulted[cam.label] = 'SD missing/full/unformatted'
-            self.get_logger().error(
-                f'[{cam.label}] SD full/unusable -> mission ended (clean stop on all cameras). '
-                f'Empty the card, then restart with [1].')
+            self._faulted[cam.label] = 'SD full'
+            self.get_logger().error(f'[{cam.label}] SD full -- recording stopped')
             set_recording(self.cameras, False)
             self.recording = False
             self._set_intent(False)
             self._recovering.clear()
             self._recover_attempts.clear()
             return
-        self.get_logger().warn(f'[{cam.label}] reachable again -- re-arming and restarting recording...')
+        self.get_logger().warn(f'[{cam.label}] re-arming')
         cam.init()
         cam.set_datetime()
         cam.start()
@@ -636,7 +621,7 @@ class GoProManagerNode(Node):
         Written to a file the host watcher polls; the manager has no Vbus itself."""
         try:
             with open(self.vbus_request_file, 'w') as f:
-                f.write(f'{cam.hub}:{cam.port}\n')
+                f.write(f'{cam.hub}:{cam.port} {cam.label}\n')   # label so the host watcher can log [LEFT]/[RIGHT]
         except OSError as e:
             # Do NOT advance the cooldown: the request never reached the watcher, so
             # the next tick should retry rather than back off for vbus_cooldown.
@@ -645,9 +630,7 @@ class GoProManagerNode(Node):
         # Only now that the request is on disk do we start the cooldown (cycle +
         # cold-boot + re-arm take ~vbus_cooldown s; don't spam the watcher meanwhile).
         self._vbus_cooldown_until[cam.label] = now + self.vbus_cooldown
-        self.get_logger().warn(
-            f'[{cam.label}] capture-dead (brown-out) -> requested host Vbus '
-            f'power-cycle of socket {cam.hub}:{cam.port}.')
+        self.get_logger().warn(f'[{cam.label}] power-cycle requested (brown-out)')
 
     # =====================================================================
     # Snapshot + publish
@@ -721,20 +704,25 @@ class GoProManagerNode(Node):
             self.state = GoProSystem.STATE_INITIALIZING
             self.message = f'{len(self._ready)}/{n} cameras ready'
 
-        # Mirror the machine signal (the ~/system topic, read by the nav) onto the
-        # HUMAN channel (the logs): whoever reviews journalctl at the surface MUST
-        # see the single most important event -- entering or leaving EMERGENCY.
-        # Logged only on a state CHANGE, so it never spams every tick.
-        if self.state != self._last_state:
-            if self.state == GoProSystem.STATE_FAULT:
-                self.get_logger().error(f'*** EMERGENCY (MISSION COMPROMISED) *** {self.message}')
-            elif self.state == GoProSystem.STATE_DEGRADED:
-                self.get_logger().warn(f'DEGRADED -- {self.message}')
-            elif self.state == GoProSystem.STATE_RECORDING:
-                self.get_logger().info(f'state -> RECORDING (emergency cleared if any): {self.message}')
-            elif self.state == GoProSystem.STATE_READY:
-                self.get_logger().info(f'state -> READY: {self.message}')
-            self._last_state = self.state
+        # Human channel: name the EMERGENCY culprit(s) per camera, once per episode.
+        # The aggregate state itself still rides the ~/system topic for the nav; here
+        # we only surface it to a human reviewing journalctl at the surface.
+        if self.state == GoProSystem.STATE_FAULT:
+            if self._faulted:
+                culprits = dict(self._faulted)
+            elif all_lost:
+                culprits = {c.label: 'no camera filming' for c in self.cameras}
+            else:
+                culprits = {lbl: 'recovery failed' for lbl in self._recovering}
+        else:
+            culprits = {}
+        for lbl, why in culprits.items():
+            if lbl not in self._emergency_logged:
+                self.get_logger().error(f'[{lbl}] EMERGENCY ({why})')
+                self._emergency_logged.add(lbl)
+        for lbl in list(self._emergency_logged):
+            if lbl not in culprits:
+                self._emergency_logged.discard(lbl)   # cleared -> a later fault logs again
 
         self.system_pub.publish(GoProSystem(
             state=self.state, message=self.message, recording=self.recording,
