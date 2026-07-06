@@ -528,12 +528,15 @@ class GoProManagerNode(Node):
                 self._strikes[cam.label] += 1
                 self._recovering.setdefault(cam.label, now)
                 if self._strikes[cam.label] == 1:
-                    # Distinct verbs: "lost" = no USB answer (cannot confirm filming);
-                    # "stopped filming" = answers but not encoding.
+                    # Distinct, unambiguous verbs:
+                    #  "unreachable"  = no USB answer at all (still on the bus? brown-out?)
+                    #                   -- vs "unplugged" which means the socket LEFT the bus.
+                    #  "not filming"  = answers but stopped encoding on its own
+                    #                   -- vs "stopped recording" which is an operator stop.
                     if not h['reachable']:
-                        self.get_logger().warn(f'[{cam.label}] lost')
+                        self.get_logger().warn(f'[{cam.label}] unreachable')
                     else:
-                        self.get_logger().warn(f'[{cam.label}] stopped filming')
+                        self.get_logger().warn(f'[{cam.label}] not filming')
                 if (self._strikes[cam.label] >= self.strikes_max
                         and now >= self._cooldown_until[cam.label]):
                     self._recover(cam, now)

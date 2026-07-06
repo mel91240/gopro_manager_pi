@@ -13,6 +13,10 @@ Wants=docker.service
 Type=simple
 Restart=on-failure
 RestartSec=3
+# A clean stop kills the container (ExecStop -> docker rm -f), so the foreground
+# `docker run` exits 137 (SIGKILL) / 143 (SIGTERM). Treat those as a normal stop,
+# NOT a failure -- a genuine node crash exits 1 and still triggers Restart=.
+SuccessExitStatus=137 143
 SyslogIdentifier=gopro
 User=__USER__
 Environment=HOME=__HOME__
