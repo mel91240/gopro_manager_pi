@@ -241,7 +241,21 @@ class GoProManagerNode(Node):
                     self._ready.discard(cam.label)
                     self.get_logger().warn(f'[{cam.label}] dropped off the bus -- will re-arm when back.')
                     dirty = True
-                continue
+                    continue
+                # Reachable and believed READY -- but a brief unplug/replug (same IP,
+                # within one rescan) or just sitting idle silently drops the camera
+                # back to MTP mode: it still answers /version (reachable) yet is no
+                # longer armed (shutter would 500), so READY would be a LIE. Re-assert
+                # wired control every scan (idempotent, no beep, no recording) so a
+                # camera can never stay stuck in MTP. If it refuses the command it has
+                # genuinely lost wired control -> drop from READY and re-arm fully.
+                if cam.enable_wired_control():
+                    continue
+                self._ready.discard(cam.label)
+                self.get_logger().warn(
+                    f'[{cam.label}] lost wired control (fell back to USB/MTP?) -- re-arming.')
+                dirty = True
+                # fall through to the re-arm path below
             if not up or now < self._cooldown_until.get(cam.label, 0.0):
                 continue                            # off the bus -- wait for the revive
             self._cooldown_until[cam.label] = now + self.restart_cooldown

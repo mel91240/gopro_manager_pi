@@ -136,12 +136,14 @@ class GoPro:
         # report failure instead of a false 'armed' from a lucky preset call.
         return preset_ok and wired_code == 200
 
-    def enable_wired_control(self) -> None:
+    def enable_wired_control(self) -> bool:
         """Re-assert wired USB control without touching the preset/settings. A
         camera silently falls back to MTP mode after sitting idle or re-enumerating,
         which makes shutter/start return HTTP 500 -> a spurious 'FAILED to start';
-        calling this right before a (re)start avoids it. Lighter than init()."""
-        self._request("/gopro/camera/control/wired_usb?p=1", timeout=4)
+        calling this right before a (re)start avoids it. Lighter than init().
+        Returns True if the camera accepted the command (HTTP 200)."""
+        code, _ = self._request("/gopro/camera/control/wired_usb?p=1", timeout=4)
+        return code == 200
 
     def set_preset_group(self, group_id: int) -> bool:
         """Select a preset group (1000=Video, 1001=Photo, 1002=Timelapse)."""
