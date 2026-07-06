@@ -4,11 +4,15 @@ After=docker.service network-online.target
 Wants=docker.service
 
 [Service]
-# manager_up.sh launches a DETACHED docker container and returns, so this is a
-# oneshot that stays "active" afterwards; the container itself (and its docker
-# --restart unless-stopped) keeps it alive at runtime, systemd (re)starts it at boot.
-Type=oneshot
-RemainAfterExit=yes
+# manager_up.sh now runs `docker run` in the FOREGROUND (no -d), so this process
+# stays alive for the whole life of the container. That is what lets systemd
+# capture the manager's stdout into journald -> `journalctl -u gopro-manager`.
+# systemd owns the lifecycle (Restart=), so the container carries no docker
+# --restart policy. Restart only fires on an unexpected crash, never on a clean
+# `systemctl stop` (which is an explicit operator action).
+Type=simple
+Restart=on-failure
+RestartSec=3
 User=__USER__
 Environment=HOME=__HOME__
 # Paths filled in by install.sh (sed on __GOPRO_SCRIPTS__) -- never hard-coded.
