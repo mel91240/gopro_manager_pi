@@ -78,9 +78,14 @@ expected_missing() {
     if (( ${#PORT_TAKEN[@]} == EXPECTED )); then       # full set visible -> snapshot it
         : > "$REF"; local hp; for hp in "${!PORT_TAKEN[@]}"; do echo "$hp" >> "$REF"; done
     fi
-    local hp; declare -A EXP=()
-    [[ -f $REF ]]     && while IFS= read -r hp;   do [[ -n $hp ]] && EXP[$hp]=1; done < "$REF"
-    [[ -f $SOCKMAP ]] && while IFS= read -r hp _; do [[ -n $hp ]] && EXP[$hp]=1; done < "$SOCKMAP"
+    # Take only the FIRST field (the "hub:port") of each line. .socket_labels lines
+    # are "hub:port LABEL", so we must word-split -- do NOT use `IFS=` here (empty IFS
+    # disables splitting and would keep the label glued on, e.g. "2-2:2 LEFT", which
+    # then never matches a present "2-2:2" -> a PRESENT camera looks missing and gets
+    # power-cycled forever). `read hp _` with default IFS drops the label into `_`.
+    local hp _; declare -A EXP=()
+    [[ -f $REF ]]     && while read -r hp _; do [[ -n $hp ]] && EXP[$hp]=1; done < "$REF"
+    [[ -f $SOCKMAP ]] && while read -r hp _; do [[ -n $hp ]] && EXP[$hp]=1; done < "$SOCKMAP"
     for hp in "${!EXP[@]}"; do
         [[ -z ${PORT_TAKEN[$hp]:-} ]] && echo "$hp"
     done
