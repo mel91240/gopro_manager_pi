@@ -116,12 +116,12 @@ if [[ "${1:-}" == "--watch" ]]; then
         for hp in "${!DISABLED[@]}"; do
             off_port "$hp"; MISS[$hp]=0; GRACE[$hp]=0
             if [[ -z ${SOLO_OFF[$hp]:-} ]]; then
-                echo "$(label_of "$hp") solo off -- power cut (socket $hp)"; SOLO_OFF[$hp]=1
+                echo "$(label_of "$hp") power off"; SOLO_OFF[$hp]=1
             fi
         done
         for hp in "${!SOLO_OFF[@]}"; do
             if [[ -z ${DISABLED[$hp]:-} ]]; then
-                echo "$(label_of "$hp") solo end -- power on (socket $hp)"; on_port "$hp"; unset 'SOLO_OFF[$hp]'
+                echo "$(label_of "$hp") power on"; on_port "$hp"; unset 'SOLO_OFF[$hp]'
             fi
         done
         mapfile -t missing < <(missing_ports)
@@ -135,7 +135,7 @@ if [[ "${1:-}" == "--watch" ]]; then
             fi
             MISS[$hp]=$(( ${MISS[$hp]:-0} + 1 ))
             if (( ${MISS[$hp]} >= CONFIRM )); then
-                echo "$(label_of "$hp") power-cycle (socket $hp empty ${MISS[$hp]} scans)"
+                echo "$(label_of "$hp") power-cycle"
                 cycle_port "$hp"; MISS[$hp]=0
                 GRACE[$hp]=$BOOT_SCANS          # non-blocking boot grace (replaces the old blocking sleep 30)
             fi

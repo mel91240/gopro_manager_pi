@@ -194,7 +194,11 @@ class GoProManagerNode(Node):
                 continue                            # no ppps socket -> keep order label
             slot = (cam.hub, cam.port)
             if slot not in self._label_by_slot:
-                free = [l for l in self.labels if l not in used]
+                # Exclude DISABLED labels: a solo'd camera's socket is off/absent, so
+                # its label must stay reserved -- otherwise the surviving camera would
+                # grab the disabled one's label (e.g. after a restart with only the
+                # kept camera present) and get filtered out as "disabled" itself.
+                free = [l for l in self.labels if l not in used and l not in self._disabled]
                 self._label_by_slot[slot] = free[0] if free else cam.label
                 used.add(self._label_by_slot[slot])
             cam.label = self._label_by_slot[slot]
@@ -624,11 +628,14 @@ class GoProManagerNode(Node):
         """Publish the socket->label map so the host watcher can log [LEFT]/[RIGHT]
         instead of a raw 'socket 2-2:2'. Atomic (temp + rename) since the watcher
         reads it on every scan."""
+        for (hub, port), lbl in self._label_by_slot.items():
+            self._seen_sockets[lbl] = (hub, port)   # remember it even once the socket goes absent
         tmp = self.socket_labels_file + '.tmp'
         try:
+            # Write ALL ever-seen sockets (sticky), not just present ones, so the
+            # watcher can still name a socket it powers off/on/cycles while empty.
             with open(tmp, 'w') as f:
-                for (hub, port), lbl in self._label_by_slot.items():
-                    self._seen_sockets[lbl] = (hub, port)   # remember it even once the socket goes absent
+                for lbl, (hub, port) in self._seen_sockets.items():
                     f.write(f'{hub}:{port} {lbl}\n')
             os.replace(tmp, self.socket_labels_file)
         except OSError:
@@ -643,12 +650,11 @@ class GoProManagerNode(Node):
                     if len(parts) >= 2:
                         self._disabled.add(parts[1])
                         self._disabled_sockets[parts[1]] = parts[0]   # keep the socket so .solo stays stable after a restart
+                        self._seen_sockets[parts[1]] = tuple(parts[0].rsplit(':', 1))  # so the watcher can still name [LEFT] the cut socket
         except OSError:
             return
-        if self._disabled:
-            active = '/'.join(l for l in self.labels if l not in self._disabled)
-            self.get_logger().warn(
-                f'solo persisted -- only {active} active (disabled {"/".join(sorted(self._disabled))})')
+        for lbl in sorted(self._disabled):
+            self.get_logger().info(f'[{lbl}] solo off')   # persisted across restart/reboot
 
     def _apply_solo(self, token):
         """Act on a solo/duo request. 'duo' re-enables everything; a label keeps
@@ -659,9 +665,8 @@ class GoProManagerNode(Node):
         stop it first, so a take is never severed."""
         t = token.strip().upper()
         if t in ('DUO', 'OFF'):
-            if self._disabled:
-                for lbl in sorted(self._disabled):
-                    self.get_logger().info(f'[{lbl}] solo off -- re-enabled')
+            for lbl in sorted(self._disabled):
+                self.get_logger().info(f'[{lbl}] solo end')
             self._disabled.clear()
             self._disabled_sockets.clear()
             self._write_solo_file()          # empty -> watcher powers all back on
@@ -694,9 +699,8 @@ class GoProManagerNode(Node):
         self._disabled_sockets = {l: hp for l, hp in self._disabled_sockets.items() if l in disabled}
         self._sync_solo_file()
         for lbl in sorted(disabled):
-            where = 'powering down' if lbl in self._disabled_sockets else 'already absent'
-            self.get_logger().info(f'[{lbl}] solo off -- {where}')
-        self.get_logger().info(f'[{keep}] solo -- only active camera')
+            self.get_logger().info(f'[{lbl}] solo off')
+        self.get_logger().info(f'[{keep}] solo')
 
     # =====================================================================
     # Periodic tick: snapshot -> watchdog -> publish
