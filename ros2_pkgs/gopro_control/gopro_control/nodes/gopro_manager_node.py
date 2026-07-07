@@ -48,11 +48,11 @@ class GoProManagerNode(Node):
         self.declare_parameter('camera_labels', ['LEFT', 'RIGHT'])   # 1st label -> 1st USB socket in (hub,port) order: hub port 2 = LEFT, hub port 4 = RIGHT (this rig's wiring; serials end ...185 / ...575)
         self.declare_parameter('tick_period', 1.0)                   # status publish + watchdog period [s]
         self.declare_parameter('strikes_before_restart', 2)          # consecutive bad checks before acting
-        self.declare_parameter('fault_after_attempts', 6)            # spaced recovery attempts on a recovering cam before escalating DEGRADED -> FAULT (6 x restart_cooldown ~= fault_after)
+        self.declare_parameter('fault_after_attempts', 9)            # spaced recovery attempts before escalating DEGRADED -> FAULT (~45s): a power-cycle (~10s) + reboot (~25s) can finish before EMERGENCY
         self.declare_parameter('unreliable_after', 3)                # distinct drop episodes for ONE cam within ONE take -> latched EMERGENCY (flapping camera)
         self.declare_parameter('record_grace_period', 10.0)          # [s] after start: encoder init, watchdog waits
         self.declare_parameter('restart_cooldown', 5.0)              # [s] between recovery attempts (a rebooting cam has time to return before the next is counted)
-        self.declare_parameter('fault_after', 30.0)                  # [s] a cam lost this long -> mission compromised
+        self.declare_parameter('fault_after', 45.0)                  # [s] a cam lost this long -> mission compromised (gives a power-cycle + reboot time first)
         self.declare_parameter('discovery_timeout', 20.0)            # [s] wait for all cams to enumerate at boot
         self.declare_parameter('resume_on_restart', True)            # auto-resume recording after a reboot
         self.declare_parameter('vbus_recover_after', 3)              # failed soft re-arms before asking the host watcher for a Vbus cycle

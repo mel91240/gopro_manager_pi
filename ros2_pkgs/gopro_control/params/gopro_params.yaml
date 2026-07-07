@@ -7,11 +7,11 @@ gopro_manager:
     camera_labels: ["LEFT", "RIGHT"]   # labels map to USB sockets in (hub,port) order (1st label -> 1st socket): port2(.185)=LEFT, port4(.575)=RIGHT
     tick_period: 1.0                   # [s] status publish + watchdog health-check period
     strikes_before_restart: 2          # consecutive "not recording" checks before a soft restart
-    fault_after_attempts: 6            # spaced recovery attempts on a recovering camera before DEGRADED escalates to FAULT (6 x restart_cooldown ~= fault_after)
+    fault_after_attempts: 9            # spaced recovery attempts before DEGRADED escalates to FAULT (~45s) -- long enough that the watcher's power-cycle (~10s) + camera reboot (~25s) can finish BEFORE we cry EMERGENCY
     unreliable_after: 3                # distinct drop episodes for ONE camera within ONE take -> latched EMERGENCY (flapping camera declared unreliable)
     record_grace_period: 10.0          # [s] after start: encoder init time, watchdog stays quiet
     restart_cooldown: 5.0              # [s] min delay between soft restarts -> a re-armed/rebooting camera has time to come back before the next attempt is counted
-    fault_after: 30.0                  # [s] a camera lost this long -> mission compromised (EMERGENCY)
+    fault_after: 45.0                  # [s] a camera lost this long -> mission compromised (EMERGENCY) -- gives a power-cycle + reboot time to bring it back first
     discovery_timeout: 20.0            # [s] wait for all cameras to enumerate at boot
     resume_on_restart: true            # auto-resume recording after a Pi reboot (mid-mission)
     # --- brown-out (capture-dead) recovery: ask the host watcher for a Vbus cycle ---
