@@ -103,6 +103,8 @@ class GoProManagerNode(Node):
         self._drop_episodes = {}        # label -> distinct drop episodes in the CURRENT take (reset on each record start)
         self._unreliable = set()        # labels that flapped too many times this take -> latched EMERGENCY until the take ends
         self._disabled = set()          # labels deliberately powered off (solo mode): not expected, not revived, not an EMERGENCY
+        self._disabled_sockets = {}     # label -> 'hub:port' for disabled cams: STABLE (kept until duo) so .solo never flaps
+        self._seen_sockets = {}         # label -> (hub, port) ever seen this boot (sticky), so solo can cut a just-unplugged cam at once
         self._strikes = {}
         self._grace_until = {}
         self._record_grace_until = 0.0   # post-(re)start encoder-init window; suppresses the all-lost emergency ONLY during a legitimate start, not a per-camera recovery
@@ -593,7 +595,7 @@ class GoProManagerNode(Node):
         for slot, lbl in self._label_by_slot.items():
             if lbl == label:
                 return slot
-        return None
+        return self._seen_sockets.get(label)   # sticky: survives _label_by_slot releasing an absent socket
 
     def _write_solo_file(self, sockets=None):
         """Publish the disabled sockets to solo_file for the host watcher
@@ -606,15 +608,17 @@ class GoProManagerNode(Node):
             self.get_logger().error(f'solo: could not write {self.solo_file}: {e}')
 
     def _sync_solo_file(self):
-        """(Re)write .solo with the socket of every disabled label we can resolve,
-        so a disabled camera gets its Vbus cut even if its socket was unknown when
-        the solo was requested (it becomes known the moment it appears on the bus)."""
-        sockets = {}
+        """Keep .solo current: fill in the socket of any disabled label still
+        unknown (it becomes known once the camera appears on the bus). The map is
+        STABLE -- a socket already recorded is NEVER dropped here (only `duo` or a
+        solo switch drops labels), so a powered-off camera whose live socket the
+        manager has since forgotten cannot make .solo flap off/on."""
         for lbl in self._disabled:
-            slot = self._socket_of(lbl)
-            if slot is not None:
-                sockets[lbl] = f'{slot[0]}:{slot[1]}'
-        self._write_solo_file(sockets)
+            if lbl not in self._disabled_sockets:
+                slot = self._socket_of(lbl)
+                if slot is not None:
+                    self._disabled_sockets[lbl] = f'{slot[0]}:{slot[1]}'
+        self._write_solo_file(self._disabled_sockets)
 
     def _write_socket_labels(self):
         """Publish the socket->label map so the host watcher can log [LEFT]/[RIGHT]
@@ -624,6 +628,7 @@ class GoProManagerNode(Node):
         try:
             with open(tmp, 'w') as f:
                 for (hub, port), lbl in self._label_by_slot.items():
+                    self._seen_sockets[lbl] = (hub, port)   # remember it even once the socket goes absent
                     f.write(f'{hub}:{port} {lbl}\n')
             os.replace(tmp, self.socket_labels_file)
         except OSError:
@@ -637,6 +642,7 @@ class GoProManagerNode(Node):
                     parts = ln.split()
                     if len(parts) >= 2:
                         self._disabled.add(parts[1])
+                        self._disabled_sockets[parts[1]] = parts[0]   # keep the socket so .solo stays stable after a restart
         except OSError:
             return
         if self._disabled:
@@ -657,6 +663,7 @@ class GoProManagerNode(Node):
                 for lbl in sorted(self._disabled):
                     self.get_logger().info(f'[{lbl}] solo off -- re-enabled')
             self._disabled.clear()
+            self._disabled_sockets.clear()
             self._write_solo_file()          # empty -> watcher powers all back on
             return
         if t not in self.labels:
@@ -682,9 +689,12 @@ class GoProManagerNode(Node):
         self._reviving_logged -= disabled
         self.cameras = [c for c in self.cameras if c.label not in disabled]
         self._ready -= disabled
-        self._sync_solo_file()               # cut the sockets we know; the rest are already absent
+        # Rebuild the STABLE socket map: keep known sockets of still-disabled labels
+        # (drops any label we just re-enabled on a solo switch); _sync fills the rest.
+        self._disabled_sockets = {l: hp for l, hp in self._disabled_sockets.items() if l in disabled}
+        self._sync_solo_file()
         for lbl in sorted(disabled):
-            where = 'powering down' if self._socket_of(lbl) else 'already absent'
+            where = 'powering down' if lbl in self._disabled_sockets else 'already absent'
             self.get_logger().info(f'[{lbl}] solo off -- {where}')
         self.get_logger().info(f'[{keep}] solo -- only active camera')
 
