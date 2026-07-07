@@ -8,11 +8,12 @@
 #  2. We act only on a SUSTAINED, CONFIRMED absence (several consecutive scans),
 #     never on a single check -- a camera that blinks off for ~1s and comes back
 #     must NOT be power-cycled.
-#  3. Vbus is a LAST resort, never a first reflex: an expected socket must stay
-#     empty for a long window (EMPTY_BEFORE_CYCLE, ~40s) before the FIRST cycle --
-#     long enough for a camera to boot/enumerate and for the manager to recover it.
-#     A GoPro that is PRESENT (its USB vendor id is on the bus, any mode) is NEVER
-#     cut. So we only ever cycle a socket whose camera is genuinely gone/dead.
+#  3. Vbus is a last resort, never a first reflex: an expected socket must stay
+#     empty a while before the FIRST cycle -- long IDLE/at boot (EMPTY_BEFORE_CYCLE,
+#     ~40s: let a camera enumerate, don't cut a booting one), but SHORTER while a
+#     take is recording (REC_EMPTY_BEFORE_CYCLE, ~10s) so the Vbus is TRIED before
+#     the manager's ~30s EMERGENCY. A GoPro that is PRESENT (its USB vendor id is on
+#     the bus, any mode) is NEVER cut -- we only cycle a socket whose camera is gone.
 #  4. We BACK OFF: after MAX_CYCLES tries with no return we give up on a socket and
 #     stay quiet until it reappears and is stable -- no endless power-cycle loop.
 #  We expect the FULL configured set of GoPro sockets (2 by default; 1 in solo, the
@@ -32,11 +33,13 @@ REF="$(cd "$(dirname "$0")" && pwd)/.gopro_ref"     # lines: "hub:port" (expecte
 UHUBCTL=$(command -v uhubctl 2>/dev/null || echo /usr/sbin/uhubctl)   # resolve where uhubctl really is (must match the /etc/sudoers.d/uhubctl path install.sh grants)
 EXPECTED=${GOPRO_COUNT:-2}    # number of GoPro sockets on the rig
 SCAN=2                        # [s] between scans
-EMPTY_BEFORE_CYCLE=20         # [scans] an expected socket must be empty this long (~40s) before the FIRST Vbus -- Vbus is a LAST resort: leave time to boot / for the manager's recovery
+EMPTY_BEFORE_CYCLE=20         # [scans] IDLE/boot: an expected socket must be empty this long (~40s) before the FIRST Vbus -- leave time to boot, don't cut an enumerating camera
+REC_EMPTY_BEFORE_CYCLE=5      # [scans] WHILE RECORDING (~10s): power-cycle sooner, so the Vbus is TRIED before the manager's ~30s EMERGENCY (a real hammer before we give up)
 CONFIRM=3                     # [scans] once we are already cycling a socket (~6s), retries are faster
 REQ="$(cd "$(dirname "$0")" && pwd)/.revive_request"   # manager writes "hub:port" here for a targeted Vbus cycle (on-bus capture-dead cam)
 SOLO="$(cd "$(dirname "$0")" && pwd)/.solo"            # manager writes "hub:port LABEL" per socket to keep POWERED OFF (solo mode); empty/absent = duo
 SOCKMAP="$(cd "$(dirname "$0")" && pwd)/.socket_labels" # manager writes "hub:port LABEL": lets us log [LEFT]/[RIGHT] instead of a raw "socket 2-2:2"
+REC_INTENT="$(cd "$(dirname "$0")" && pwd)/.recording_intent"   # manager writes this WHILE recording -> present = a take is in progress (cycle sooner)
 REQ_OFF=15                    # [s] Vbus OFF for a requested cycle (a capture-dead/black-but-lit cam needs a long cut, not the 8s of an off-bus blip)
 BOOT_SETTLE=30                # [s] after ANY cycle, ignore that socket's emptiness this long (it is booting/enumerating) -> never re-cut a camera mid-boot
 BOOT_SCANS=$(( (BOOT_SETTLE + SCAN - 1) / SCAN ))   # the above expressed in scan ticks
@@ -129,7 +132,6 @@ handle_request() {
 }
 
 if [[ "${1:-}" == "--watch" ]]; then
-    echo "[autorevive] watching (Vbus is a LAST resort: only after an expected socket stays empty ~$((EMPTY_BEFORE_CYCLE*SCAN))s; a present GoPro is NEVER cut; give up after $MAX_CYCLES tries)"
     declare -A MISS GRACE SOLO_OFF CYCLES GIVEN_UP PRESENT_RUN
     while true; do
         CYCLED_PORT=
@@ -169,6 +171,7 @@ if [[ "${1:-}" == "--watch" ]]; then
             # camera time to boot/enumerate and the manager time to recover it. Once we
             # ARE cycling it (CYCLES>0) the retries are faster (~6s).
             thresh=$EMPTY_BEFORE_CYCLE
+            [[ -f $REC_INTENT ]] && thresh=$REC_EMPTY_BEFORE_CYCLE   # recording -> try the Vbus BEFORE the EMERGENCY, not after
             (( ${CYCLES[$hp]:-0} > 0 )) && thresh=$CONFIRM
             MISS[$hp]=$(( ${MISS[$hp]:-0} + 1 ))
             if (( ${MISS[$hp]} >= thresh )); then
