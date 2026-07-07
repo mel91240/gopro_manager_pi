@@ -664,17 +664,19 @@ class GoProManagerNode(Node):
                 f"solo: unknown camera '{token}' (expected {'/'.join(self.labels)} or duo)")
             return
         keep = t
-        disabled = set()
+        disabled, refused = set(), 0
         for lbl in self.labels:
             if lbl == keep:
                 continue
             cam = next((c for c in self.cameras if c.label == lbl), None)
             if cam is not None and cam.recording_now():
-                self.get_logger().warn(f'[{lbl}] solo refused -- it is recording (stop it first)')
+                self.get_logger().warn(f'[{lbl}] solo refused (recording)')
+                refused += 1
                 continue
             disabled.add(lbl)
         if not disabled:
-            self.get_logger().warn(f'solo {keep}: nothing to disable -- aborted')
+            if not refused:                       # truly no candidate (not a refusal -- that line speaks for itself)
+                self.get_logger().warn(f'solo {keep}: nothing to disable')
             return
         self._disabled = disabled
         self._reviving_logged -= disabled
