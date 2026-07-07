@@ -8,6 +8,12 @@
 #  2. We act only on a SUSTAINED, CONFIRMED absence (several consecutive scans),
 #     never on a single check -- a camera that blinks off for ~1s and comes back
 #     must NOT be power-cycled.
+#  3. We ONLY revive a camera that was PRESENT then dropped (EVER_SEEN) -- NEVER a
+#     camera that is merely booting or has never appeared. Cutting Vbus on a camera
+#     that is still enumerating (e.g. at boot) just makes it suffer for nothing.
+#  4. We BACK OFF: after MAX_CYCLES tries with no return we give up on a socket
+#     (removed/dead camera) and stay quiet until it reappears and is stable -- no
+#     endless power-cycle loop.
 #
 # Cameras are tracked by PORT, not by serial: whatever camera is plugged into a
 # known GoPro socket is "that camera". So a flooded camera swapped for a fresh
@@ -29,6 +35,8 @@ SOCKMAP="$(cd "$(dirname "$0")" && pwd)/.socket_labels" # manager writes "hub:po
 REQ_OFF=15                    # [s] Vbus OFF for a requested cycle (a capture-dead/black-but-lit cam needs a long cut, not the 8s of an off-bus blip)
 BOOT_SETTLE=30                # [s] after ANY cycle, ignore that socket's emptiness this long (it is booting/enumerating) -> never re-cut a camera mid-boot
 BOOT_SCANS=$(( (BOOT_SETTLE + SCAN - 1) / SCAN ))   # the above expressed in scan ticks
+MAX_CYCLES=3                  # give up power-cycling a socket after this many tries with no return (no endless Vbus loop on a removed/dead camera)
+STABLE=5                      # a returned camera must stay present this many scans before its back-off resets (a mere flicker back does NOT re-arm the loop)
 
 declare -A PORT_TAKEN         # hub:port -> 1  (a GoPro is enumerated there right now)
 CYCLED_PORT=                  # set by handle_request to the socket it just cycled (so the watch loop can grant it a boot grace)
@@ -50,14 +58,16 @@ scan_now() {
 
 # Echo each expected GoPro port that is currently EMPTY (no GoPro enumerated).
 # Refreshes the expected-port set whenever the full set is present.
-missing_ports() {
-    scan_now || return 1
+# Echo each EXPECTED GoPro socket currently EMPTY. Reads the GLOBAL PORT_TAKEN,
+# so a scan_now must have run in the SAME shell first (the watch loop relies on
+# PORT_TAKEN staying set in the parent, which a `< <(missing_ports)` subshell would
+# hide). Expected = the full-set snapshot (.gopro_ref) UNION the manager's known
+# sockets (.socket_labels) -- the union revives a camera seen once but never with
+# the other simultaneously (REF alone, needing the full set, would miss it).
+expected_missing() {
     if (( ${#PORT_TAKEN[@]} == EXPECTED )); then       # full set visible -> snapshot it
         : > "$REF"; local hp; for hp in "${!PORT_TAKEN[@]}"; do echo "$hp" >> "$REF"; done
     fi
-    # Expected sockets = the full-set snapshot (.gopro_ref) UNION the manager's known
-    # sockets (.socket_labels). The union lets us revive a camera that was seen once
-    # but never simultaneously with the other (REF alone, needing the full set, misses it).
     local hp; declare -A EXP=()
     [[ -f $REF ]]     && while IFS= read -r hp;   do [[ -n $hp ]] && EXP[$hp]=1; done < "$REF"
     [[ -f $SOCKMAP ]] && while IFS= read -r hp _; do [[ -n $hp ]] && EXP[$hp]=1; done < "$SOCKMAP"
@@ -65,6 +75,8 @@ missing_ports() {
         [[ -z ${PORT_TAKEN[$hp]:-} ]] && echo "$hp"
     done
 }
+# One-shot helper (scan + compute) for the manual mode at the bottom.
+missing_ports() { scan_now || return 1; expected_missing; }
 
 cycle_port() { local h=${1%:*} p=${1#*:}; sudo -n "$UHUBCTL" -l "$h" -p "$p" -a cycle -d 8 >/dev/null 2>&1; }
 cycle_port_long() { local h=${1%:*} p=${1#*:}; sudo -n "$UHUBCTL" -l "$h" -p "$p" -a cycle -d "$REQ_OFF" >/dev/null 2>&1; }
@@ -102,8 +114,8 @@ handle_request() {
 }
 
 if [[ "${1:-}" == "--watch" ]]; then
-    echo "[autorevive] watching (power-cycle ONLY a socket confirmed empty for ~$((CONFIRM*SCAN))s; never a visible camera)"
-    declare -A MISS GRACE SOLO_OFF
+    echo "[autorevive] watching (power-cycle ONLY a camera that was PRESENT then dropped -- never a booting/never-seen one; give up after $MAX_CYCLES tries)"
+    declare -A MISS GRACE SOLO_OFF CYCLES GIVEN_UP PRESENT_RUN EVER_SEEN
     while true; do
         CYCLED_PORT=
         handle_request
@@ -127,24 +139,49 @@ if [[ "${1:-}" == "--watch" ]]; then
                 echo "$(label_of "$hp") power on"; on_port "$hp"; unset 'SOLO_OFF[$hp]'
             fi
         done
-        mapfile -t missing < <(missing_ports)
-        declare -A seen=()
+        scan_now || { sleep "$SCAN"; continue; }  # populate PORT_TAKEN in THIS shell (parent)
+        mapfile -t missing < <(expected_missing)  # subshell only READS PORT_TAKEN; parent keeps it
         for hp in "${missing[@]:-}"; do
             [[ -z $hp ]] && continue
-            seen[$hp]=1
+            PRESENT_RUN[$hp]=0
             [[ -n ${DISABLED[$hp]:-} ]] && continue   # solo: deliberately off -> never revive
+            [[ -n ${GIVEN_UP[$hp]:-} ]] && continue   # gave up on this one -> leave it until it returns
+            # NEVER power-cycle a socket we have not yet seen PRESENT since this watcher
+            # started: at boot the cameras take time to enumerate, and cutting their Vbus
+            # then just makes them suffer for nothing. We only recover a camera that WAS
+            # present and then dropped -- a real fall-off-the-bus, not a slow boot.
+            [[ -z ${EVER_SEEN[$hp]:-} ]] && continue
             if (( ${GRACE[$hp]:-0} > 0 )); then    # just cycled -> still booting, do NOT re-cut
                 GRACE[$hp]=$(( GRACE[$hp] - 1 )); MISS[$hp]=0; continue
             fi
             MISS[$hp]=$(( ${MISS[$hp]:-0} + 1 ))
             if (( ${MISS[$hp]} >= CONFIRM )); then
+                MISS[$hp]=0
+                CYCLES[$hp]=$(( ${CYCLES[$hp]:-0} + 1 ))
+                if (( ${CYCLES[$hp]} > MAX_CYCLES )); then
+                    # Back-off: stop Vbus-cycling a socket that never comes back (removed
+                    # or dead camera, or a manager that isn't there to re-arm it). This
+                    # is what kills the endless power-cycle loop. Auto-resets when the
+                    # camera reappears and stays STABLE.
+                    echo "$(label_of "$hp") giving up (still gone after $MAX_CYCLES power-cycles)"
+                    GIVEN_UP[$hp]=1; continue
+                fi
                 echo "$(label_of "$hp") power-cycle"
-                cycle_port "$hp"; MISS[$hp]=0
-                GRACE[$hp]=$BOOT_SCANS          # non-blocking boot grace (replaces the old blocking sleep 30)
+                cycle_port "$hp"; GRACE[$hp]=$BOOT_SCANS
             fi
         done
-        for hp in "${!MISS[@]}";  do [[ -z ${seen[$hp]:-} ]] && MISS[$hp]=0;  done   # back on bus -> reset strikes
-        for hp in "${!GRACE[@]}"; do [[ -z ${seen[$hp]:-} ]] && GRACE[$hp]=0; done   # back on bus -> clear boot grace
+        # A present + STABLE camera clears its trouble state (so a FUTURE drop gets a
+        # fresh set of cycles). Requiring several stable scans -- not one -- means a
+        # camera that only flickers back for a moment does NOT reset the back-off.
+        for hp in "${!PORT_TAKEN[@]}"; do
+            EVER_SEEN[$hp]=1                       # this socket has now been seen present -> a later drop is recoverable
+            MISS[$hp]=0; GRACE[$hp]=0
+            PRESENT_RUN[$hp]=$(( ${PRESENT_RUN[$hp]:-0} + 1 ))
+            if (( ${PRESENT_RUN[$hp]} >= STABLE )); then
+                [[ -n ${GIVEN_UP[$hp]:-} ]] && echo "$(label_of "$hp") back"
+                unset "GIVEN_UP[$hp]"; CYCLES[$hp]=0
+            fi
+        done
         sleep "$SCAN"
     done
 fi
