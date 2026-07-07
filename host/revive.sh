@@ -8,12 +8,16 @@
 #  2. We act only on a SUSTAINED, CONFIRMED absence (several consecutive scans),
 #     never on a single check -- a camera that blinks off for ~1s and comes back
 #     must NOT be power-cycled.
-#  3. We ONLY revive a camera that was PRESENT then dropped (EVER_SEEN) -- NEVER a
-#     camera that is merely booting or has never appeared. Cutting Vbus on a camera
-#     that is still enumerating (e.g. at boot) just makes it suffer for nothing.
-#  4. We BACK OFF: after MAX_CYCLES tries with no return we give up on a socket
-#     (removed/dead camera) and stay quiet until it reappears and is stable -- no
-#     endless power-cycle loop.
+#  3. Vbus is a LAST resort, never a first reflex: an expected socket must stay
+#     empty for a long window (EMPTY_BEFORE_CYCLE, ~40s) before the FIRST cycle --
+#     long enough for a camera to boot/enumerate and for the manager to recover it.
+#     A GoPro that is PRESENT (its USB vendor id is on the bus, any mode) is NEVER
+#     cut. So we only ever cycle a socket whose camera is genuinely gone/dead.
+#  4. We BACK OFF: after MAX_CYCLES tries with no return we give up on a socket and
+#     stay quiet until it reappears and is stable -- no endless power-cycle loop.
+#  We expect the FULL configured set of GoPro sockets (2 by default; 1 in solo, the
+#  disabled socket being deliberately cut and never revived) -- so a camera missing
+#  at boot IS pursued (after the window), not ignored because it was "never seen".
 #
 # Cameras are tracked by PORT, not by serial: whatever camera is plugged into a
 # known GoPro socket is "that camera". So a flooded camera swapped for a fresh
@@ -27,8 +31,9 @@ set -u
 REF="$(cd "$(dirname "$0")" && pwd)/.gopro_ref"     # lines: "hub:port" (expected GoPro sockets)
 UHUBCTL=$(command -v uhubctl 2>/dev/null || echo /usr/sbin/uhubctl)   # resolve where uhubctl really is (must match the /etc/sudoers.d/uhubctl path install.sh grants)
 EXPECTED=${GOPRO_COUNT:-2}    # number of GoPro sockets on the rig
-CONFIRM=3                     # consecutive scans a port must be empty before we act
-SCAN=2                        # [s] between scans  (CONFIRM*SCAN = confirmation window)
+SCAN=2                        # [s] between scans
+EMPTY_BEFORE_CYCLE=20         # [scans] an expected socket must be empty this long (~40s) before the FIRST Vbus -- Vbus is a LAST resort: leave time to boot / for the manager's recovery
+CONFIRM=3                     # [scans] once we are already cycling a socket (~6s), retries are faster
 REQ="$(cd "$(dirname "$0")" && pwd)/.revive_request"   # manager writes "hub:port" here for a targeted Vbus cycle (on-bus capture-dead cam)
 SOLO="$(cd "$(dirname "$0")" && pwd)/.solo"            # manager writes "hub:port LABEL" per socket to keep POWERED OFF (solo mode); empty/absent = duo
 SOCKMAP="$(cd "$(dirname "$0")" && pwd)/.socket_labels" # manager writes "hub:port LABEL": lets us log [LEFT]/[RIGHT] instead of a raw "socket 2-2:2"
@@ -50,7 +55,12 @@ scan_now() {
         [[ $line =~ Current\ status\ for\ hub\ ([^ ]+) ]] && hub=${BASH_REMATCH[1]}
         if [[ $line =~ Port\ ([0-9]+): ]]; then
             p=${BASH_REMATCH[1]}
-            [[ $line == *GoPro* ]] && PORT_TAKEN["$hub:$p"]=1
+            # Identify a GoPro by its USB VENDOR id (2672), NOT the product name:
+            # the vendor is constant across every mode (network/video/MTP/webcam),
+            # so a present-but-mode-switched camera is never mistaken for "empty"
+            # and thus never power-cycled -- and ANY GoPro (swapped-in unit) matches
+            # with no code change (identity is the SOCKET, not the serial/name).
+            [[ $line == *2672:* ]] && PORT_TAKEN["$hub:$p"]=1
         fi
     done <<< "$STATUS"
     return 0          # don't inherit the while loop's (often non-zero) exit code
@@ -114,8 +124,8 @@ handle_request() {
 }
 
 if [[ "${1:-}" == "--watch" ]]; then
-    echo "[autorevive] watching (power-cycle ONLY a camera that was PRESENT then dropped -- never a booting/never-seen one; give up after $MAX_CYCLES tries)"
-    declare -A MISS GRACE SOLO_OFF CYCLES GIVEN_UP PRESENT_RUN EVER_SEEN
+    echo "[autorevive] watching (Vbus is a LAST resort: only after an expected socket stays empty ~$((EMPTY_BEFORE_CYCLE*SCAN))s; a present GoPro is NEVER cut; give up after $MAX_CYCLES tries)"
+    declare -A MISS GRACE SOLO_OFF CYCLES GIVEN_UP PRESENT_RUN
     while true; do
         CYCLED_PORT=
         handle_request
@@ -146,16 +156,17 @@ if [[ "${1:-}" == "--watch" ]]; then
             PRESENT_RUN[$hp]=0
             [[ -n ${DISABLED[$hp]:-} ]] && continue   # solo: deliberately off -> never revive
             [[ -n ${GIVEN_UP[$hp]:-} ]] && continue   # gave up on this one -> leave it until it returns
-            # NEVER power-cycle a socket we have not yet seen PRESENT since this watcher
-            # started: at boot the cameras take time to enumerate, and cutting their Vbus
-            # then just makes them suffer for nothing. We only recover a camera that WAS
-            # present and then dropped -- a real fall-off-the-bus, not a slow boot.
-            [[ -z ${EVER_SEEN[$hp]:-} ]] && continue
             if (( ${GRACE[$hp]:-0} > 0 )); then    # just cycled -> still booting, do NOT re-cut
                 GRACE[$hp]=$(( GRACE[$hp] - 1 )); MISS[$hp]=0; continue
             fi
+            # Vbus is a LAST resort, never a first reflex: an expected socket must be
+            # empty for a long window (~40s) before the FIRST cycle -- that leaves the
+            # camera time to boot/enumerate and the manager time to recover it. Once we
+            # ARE cycling it (CYCLES>0) the retries are faster (~6s).
+            thresh=$EMPTY_BEFORE_CYCLE
+            (( ${CYCLES[$hp]:-0} > 0 )) && thresh=$CONFIRM
             MISS[$hp]=$(( ${MISS[$hp]:-0} + 1 ))
-            if (( ${MISS[$hp]} >= CONFIRM )); then
+            if (( ${MISS[$hp]} >= thresh )); then
                 MISS[$hp]=0
                 CYCLES[$hp]=$(( ${CYCLES[$hp]:-0} + 1 ))
                 if (( ${CYCLES[$hp]} > MAX_CYCLES )); then
@@ -174,7 +185,6 @@ if [[ "${1:-}" == "--watch" ]]; then
         # fresh set of cycles). Requiring several stable scans -- not one -- means a
         # camera that only flickers back for a moment does NOT reset the back-off.
         for hp in "${!PORT_TAKEN[@]}"; do
-            EVER_SEEN[$hp]=1                       # this socket has now been seen present -> a later drop is recoverable
             MISS[$hp]=0; GRACE[$hp]=0
             PRESENT_RUN[$hp]=$(( ${PRESENT_RUN[$hp]:-0} + 1 ))
             if (( ${PRESENT_RUN[$hp]} >= STABLE )); then

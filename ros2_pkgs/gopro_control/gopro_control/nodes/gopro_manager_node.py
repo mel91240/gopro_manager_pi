@@ -902,11 +902,12 @@ class GoProManagerNode(Node):
         # graces: a single freshly re-appeared camera's recovery grace used to mask
         # this emergency for the genuinely-dead ones (via max()) for up to
         # grace_period -- exactly when the vehicle most needs to hold.
-        # Immediate "vehicle must hold" only makes sense when we HAD several cameras
-        # and they ALL vanished at once. A single-camera take (or solo mode) instead
-        # goes through the patient recovery path -- one drop should not instantly
-        # emergency, it should get its recovery attempts / fault_after first.
-        all_lost = (self.recording and want >= 2 and recording_now == 0
+        # Nothing is being filmed while recording -> we are capturing NOTHING, so the
+        # vehicle must hold NOW: whether it is the ONLY (solo) camera dropping or both
+        # duo cameras vanishing at once. A duo take that still has one camera filming
+        # is recording_now>=1 -> NOT all_lost -> the dropped one gets patient recovery.
+        # Auto-clears the instant any camera films again.
+        all_lost = (self.recording and n > 0 and recording_now == 0
                     and now >= self._record_grace_until)
         if self._faulted:
             self.state = GoProSystem.STATE_FAULT
