@@ -654,7 +654,7 @@ class GoProManagerNode(Node):
         except OSError:
             return
         for lbl in sorted(self._disabled):
-            self.get_logger().info(f'[{lbl}] solo off')   # persisted across restart/reboot
+            self.get_logger().info(f'[{lbl}] disabled')   # solo persisted across restart/reboot
 
     def _apply_solo(self, token):
         """Act on a solo/duo request. 'duo' re-enables everything; a label keeps
@@ -666,7 +666,7 @@ class GoProManagerNode(Node):
         t = token.strip().upper()
         if t in ('DUO', 'OFF'):
             for lbl in sorted(self._disabled):
-                self.get_logger().info(f'[{lbl}] solo end')
+                self.get_logger().info(f'[{lbl}] enabled')
             self._disabled.clear()
             self._disabled_sockets.clear()
             self._write_solo_file()          # empty -> watcher powers all back on
@@ -699,7 +699,7 @@ class GoProManagerNode(Node):
         self._disabled_sockets = {l: hp for l, hp in self._disabled_sockets.items() if l in disabled}
         self._sync_solo_file()
         for lbl in sorted(disabled):
-            self.get_logger().info(f'[{lbl}] solo off')
+            self.get_logger().info(f'[{lbl}] disabled')
         self.get_logger().info(f'[{keep}] solo')
 
     # =====================================================================
