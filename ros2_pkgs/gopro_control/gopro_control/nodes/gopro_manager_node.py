@@ -552,13 +552,15 @@ class GoProManagerNode(Node):
                 details.append(f'{cam.label}: {detail}')
                 self.get_logger().warn(f'[{cam.label}] settings not applied ({detail})')
         present = {c.label for c in self.cameras}
-        for lbl in self.labels:                       # expected sockets with no camera present
-            if lbl not in present:
-                details.append(f'{lbl}: absent (not applied)')
-                self.get_logger().warn(f'[{lbl}] settings not applied (absent)')
-        all_ok = (not details) and (len(oks) == self.expected)
+        want = self.expected - len(self._disabled)    # solo: a disabled camera is not "absent", it is off on purpose
+        for lbl in self.labels:                       # EXPECTED sockets with no camera present
+            if lbl in self._disabled or lbl in present:
+                continue
+            details.append(f'{lbl}: absent (not applied)')
+            self.get_logger().warn(f'[{lbl}] settings not applied (absent)')
+        all_ok = (not details) and (len(oks) == want)
         if all_ok:
-            msg = f'Settings applied on all {self.expected} cameras.'
+            msg = f'Settings applied on all {want} camera(s).'
         else:
             msg = (f'applied on {", ".join(oks)}; ' if oks else '') + '; '.join(details)
         return self._reply(response, all_ok, msg)
@@ -711,7 +713,7 @@ class GoProManagerNode(Node):
         if self.recording:
             now = time.monotonic()
             for cam, h in snapshot:
-                if now < self._grace_until[cam.label]:
+                if now < self._grace_until.get(cam.label, 0.0):
                     continue
                 if h['recording']:
                     self._mark_healthy(cam)
@@ -750,6 +752,23 @@ class GoProManagerNode(Node):
                 if (self._strikes[cam.label] >= self.strikes_max
                         and now >= self._cooldown_until[cam.label]):
                     self._recover(cam, now)
+            # Expected cameras that are ABSENT (unplugged before/at record start, or
+            # dropped and forgotten): the host watcher power-cycles their socket; flag
+            # them here so they escalate recovering -> EMERGENCY like any drop -- this
+            # is what makes a duo mission that is missing a camera actually raise the
+            # alarm instead of silently filming a subset. Solo-disabled labels excluded.
+            present = {c.label for c in self.cameras}
+            for lbl in self.labels:
+                if lbl in self._disabled or lbl in present:
+                    continue
+                if lbl not in self._recovering:
+                    self.get_logger().warn(f'[{lbl}] missing')
+                self._recovering.setdefault(lbl, now)
+                self._strikes[lbl] = self._strikes.get(lbl, 0) + 1
+                if (self._strikes[lbl] >= self.strikes_max
+                        and now >= self._cooldown_until.get(lbl, 0.0)):
+                    self._cooldown_until[lbl] = now + self.restart_cooldown
+                    self._recover_attempts[lbl] = self._recover_attempts.get(lbl, 0) + 1
         self._publish(snapshot)
 
     def _mark_healthy(self, cam):
@@ -872,7 +891,8 @@ class GoProManagerNode(Node):
                 can_power_cycle=h['can_power_cycle']))
         sd_info = ' . '.join(sd_parts)
 
-        n = len(self.cameras)
+        n = len(self.cameras)                       # cameras PRESENT on the bus
+        want = self.expected - len(self._disabled)  # cameras we SHOULD have (2 duo, 1 solo) -- the source of truth for "is the rig complete"
         now = time.monotonic()
         # Recording, but NOTHING is being filmed (every camera dropped at once)?
         # Immediate emergency -- don't wait fault_after: the vehicle must hold
@@ -886,7 +906,7 @@ class GoProManagerNode(Node):
         # and they ALL vanished at once. A single-camera take (or solo mode) instead
         # goes through the patient recovery path -- one drop should not instantly
         # emergency, it should get its recovery attempts / fault_after first.
-        all_lost = (self.recording and n >= 2 and recording_now == 0
+        all_lost = (self.recording and want >= 2 and recording_now == 0
                     and now >= self._record_grace_until)
         if self._faulted:
             self.state = GoProSystem.STATE_FAULT
@@ -919,14 +939,19 @@ class GoProManagerNode(Node):
                 self.message = f'MISSION COMPROMISED -- {labels} ({why}, still retrying)'
             else:
                 self.state = GoProSystem.STATE_DEGRADED
-                self.message = f'{recording_now}/{n} recording, recovering {labels}'
+                self.message = f'{recording_now}/{want} recording, recovering {labels}'
         elif self.recording:
-            self.state, self.message = GoProSystem.STATE_RECORDING, 'all cameras recording'
-        elif n > 0 and len(self._ready) == n:
-            self.state, self.message = GoProSystem.STATE_READY, 'all cameras ready to record'
+            # Reached only when nothing is recovering -> every EXPECTED camera is filming.
+            self.state = GoProSystem.STATE_RECORDING
+            self.message = f'recording {recording_now}/{want}'
+        elif want > 0 and n >= want and len(self._ready) >= want:
+            # READY needs the FULL expected set present and armed -- not just "all
+            # present cameras", so a duo rig missing a camera is never called ready.
+            self.state = GoProSystem.STATE_READY
+            self.message = f'ready {len(self._ready)}/{want}'
         else:
             self.state = GoProSystem.STATE_INITIALIZING
-            self.message = f'{len(self._ready)}/{n} cameras ready'
+            self.message = f'{len(self._ready)}/{want} cameras ready'
 
         # Human channel: name the EMERGENCY culprit(s) per camera, once per episode.
         # The aggregate state itself still rides the ~/system topic for the nav; here
@@ -936,9 +961,12 @@ class GoProManagerNode(Node):
             if self._faulted:
                 culprits = dict(self._faulted)
             elif all_lost:
-                culprits = {c.label: 'no camera filming' for c in self.cameras}
+                culprits = {lbl: 'no camera filming' for lbl in self.labels if lbl not in self._disabled}
             elif self._recovering:
-                culprits = {lbl: f'could not recover after {self._recover_attempts.get(lbl, 0)} tries'
+                present_labels = {c.label for c in self.cameras}
+                culprits = {lbl: (f'missing after {self._recover_attempts.get(lbl, 0)} tries'
+                                  if lbl not in present_labels
+                                  else f'could not recover after {self._recover_attempts.get(lbl, 0)} tries')
                             for lbl in self._recovering}
             # Flapping cameras stay named even once they film again, and their
             # reason wins over a transient "recovery failed".
@@ -954,7 +982,8 @@ class GoProManagerNode(Node):
 
         self.system_pub.publish(GoProSystem(
             state=self.state, message=self.message, recording=self.recording,
-            all_ready=(n > 0 and len(self._ready) == n),
+            # all_ready = the FULL expected set is armed, not just "all present cameras".
+            all_ready=(want > 0 and len(self._ready) >= want),
             num_cameras=n, num_recording=recording_now, sd_info=sd_info))
 
 

@@ -55,12 +55,15 @@ missing_ports() {
     if (( ${#PORT_TAKEN[@]} == EXPECTED )); then       # full set visible -> snapshot it
         : > "$REF"; local hp; for hp in "${!PORT_TAKEN[@]}"; do echo "$hp" >> "$REF"; done
     fi
-    [[ -f $REF ]] || return 0
-    local hp
-    while IFS= read -r hp; do
-        [[ -z $hp ]] && continue
+    # Expected sockets = the full-set snapshot (.gopro_ref) UNION the manager's known
+    # sockets (.socket_labels). The union lets us revive a camera that was seen once
+    # but never simultaneously with the other (REF alone, needing the full set, misses it).
+    local hp; declare -A EXP=()
+    [[ -f $REF ]]     && while IFS= read -r hp;   do [[ -n $hp ]] && EXP[$hp]=1; done < "$REF"
+    [[ -f $SOCKMAP ]] && while IFS= read -r hp _; do [[ -n $hp ]] && EXP[$hp]=1; done < "$SOCKMAP"
+    for hp in "${!EXP[@]}"; do
         [[ -z ${PORT_TAKEN[$hp]:-} ]] && echo "$hp"
-    done < "$REF"
+    done
 }
 
 cycle_port() { local h=${1%:*} p=${1#*:}; sudo -n "$UHUBCTL" -l "$h" -p "$p" -a cycle -d 8 >/dev/null 2>&1; }
