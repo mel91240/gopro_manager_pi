@@ -9,6 +9,8 @@
 #   ./gopro_ctl.sh record                 start recording on all cameras
 #   ./gopro_ctl.sh stop                   stop recording
 #   ./gopro_ctl.sh status                 show state (READY/RECORDING + per-cam SD)
+#   ./gopro_ctl.sh solo LEFT|RIGHT        keep only that camera, power the other off
+#   ./gopro_ctl.sh duo                    re-enable both cameras
 #   ./gopro_ctl.sh settings k=v ...        change only the fields you pass:
 #        resolution fps fov hypersmooth wind_reduction camera_mode
 #        e.g. ./gopro_ctl.sh settings resolution=4K fps=30 fov=Linear
@@ -49,7 +51,15 @@ topic_once() {  # $1=topic
 }
 
 usage() {
-    sed -n '2,17p' "$0" | sed 's/^# \?//'
+    sed -n '2,19p' "$0" | sed 's/^# \?//'
+}
+
+# Solo/duo are handled host-side: the CLI just drops the request in a file the
+# manager consumes (it alone knows label->socket and drives the watcher). No
+# docker exec needed -- gopro_ctl.sh lives in the shared handoff dir.
+solo_request() {   # $1 = LEFT|RIGHT|duo
+    local dir; dir="$(cd "$(dirname "$0")" && pwd)"
+    printf '%s\n' "$1" > "$dir/.solo_request"
 }
 
 cmd="${1:-help}"; shift || true
@@ -57,6 +67,17 @@ case "$cmd" in
     record|start) svc_call "$NODE/record" std_srvs/srv/SetBool "{data: true}"  ;;
     stop)         svc_call "$NODE/record" std_srvs/srv/SetBool "{data: false}" ;;
     status)       topic_once "$NODE/system" ;;
+    solo)
+        tgt="$(printf '%s' "${1:-}" | tr '[:lower:]' '[:upper:]')"
+        case "$tgt" in
+            LEFT|RIGHT) ;;
+            *) echo "usage: $0 solo LEFT|RIGHT   (keep only that camera, power the other off). Back to both: $0 duo"; exit 2 ;;
+        esac
+        solo_request "$tgt"
+        echo "solo $tgt requested -- watch ./manager_log.sh: the manager confirms and powers the other camera off." ;;
+    duo)
+        solo_request duo
+        echo "duo requested -- both cameras re-enabled; watch ./manager_log.sh." ;;
     settings)
         [ $# -gt 0 ] || { echo "usage: $0 settings key=value ...  (resolution fps fov hypersmooth wind_reduction camera_mode)"; exit 2; }
         yaml=""
@@ -70,5 +91,5 @@ case "$cmd" in
         done
         svc_call "$NODE/settings" gopro_msgs/srv/GoProSettings "{$yaml}" ;;
     help|-h|--help) usage ;;
-    *) echo "unknown command '$cmd'. Try: record | stop | status | settings | help"; exit 2 ;;
+    *) echo "unknown command '$cmd'. Try: record | stop | status | solo | duo | settings | help"; exit 2 ;;
 esac

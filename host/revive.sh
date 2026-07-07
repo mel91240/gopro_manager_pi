@@ -24,6 +24,7 @@ EXPECTED=${GOPRO_COUNT:-2}    # number of GoPro sockets on the rig
 CONFIRM=3                     # consecutive scans a port must be empty before we act
 SCAN=2                        # [s] between scans  (CONFIRM*SCAN = confirmation window)
 REQ="$(cd "$(dirname "$0")" && pwd)/.revive_request"   # manager writes "hub:port" here for a targeted Vbus cycle (on-bus capture-dead cam)
+SOLO="$(cd "$(dirname "$0")" && pwd)/.solo"            # manager writes "hub:port LABEL" per socket to keep POWERED OFF (solo mode); empty/absent = duo
 REQ_OFF=15                    # [s] Vbus OFF for a requested cycle (a capture-dead/black-but-lit cam needs a long cut, not the 8s of an off-bus blip)
 BOOT_SETTLE=30                # [s] after ANY cycle, ignore that socket's emptiness this long (it is booting/enumerating) -> never re-cut a camera mid-boot
 BOOT_SCANS=$(( (BOOT_SETTLE + SCAN - 1) / SCAN ))   # the above expressed in scan ticks
@@ -63,6 +64,10 @@ missing_ports() {
 
 cycle_port() { local h=${1%:*} p=${1#*:}; sudo -n "$UHUBCTL" -l "$h" -p "$p" -a cycle -d 8 >/dev/null 2>&1; }
 cycle_port_long() { local h=${1%:*} p=${1#*:}; sudo -n "$UHUBCTL" -l "$h" -p "$p" -a cycle -d "$REQ_OFF" >/dev/null 2>&1; }
+off_port() { local h=${1%:*} p=${1#*:}; sudo -n "$UHUBCTL" -l "$h" -p "$p" -a off >/dev/null 2>&1; }
+on_port()  { local h=${1%:*} p=${1#*:}; sudo -n "$UHUBCTL" -l "$h" -p "$p" -a on  >/dev/null 2>&1; }
+# Sockets the manager marked as deliberately-off (solo mode): first field of each .solo line.
+solo_ports() { [[ -f $SOLO ]] && awk 'NF{print $1}' "$SOLO"; return 0; }
 
 # The manager (no uhubctl in its container) drops a "hub:port" into $REQ to ask us to
 # Vbus-cycle a camera that is ON the bus but capture-dead (brown-out: /state 200 but
@@ -88,7 +93,7 @@ handle_request() {
 
 if [[ "${1:-}" == "--watch" ]]; then
     echo "[autorevive] watching (power-cycle ONLY a socket confirmed empty for ~$((CONFIRM*SCAN))s; never a visible camera)"
-    declare -A MISS GRACE
+    declare -A MISS GRACE SOLO_OFF
     while true; do
         CYCLED_PORT=
         handle_request
@@ -96,11 +101,28 @@ if [[ "${1:-}" == "--watch" ]]; then
             GRACE[$CYCLED_PORT]=$BOOT_SCANS     # protect it while it cold-boots
             MISS[$CYCLED_PORT]=0
         fi
+        # Solo mode: keep the manager-designated socket(s) powered OFF and out of
+        # the revive logic. Re-assert OFF every scan (idempotent) so a camera can
+        # never creep back on; power it ON again the instant it leaves .solo (duo).
+        declare -A DISABLED=()
+        while IFS= read -r hp; do [[ -n $hp ]] && DISABLED[$hp]=1; done < <(solo_ports)
+        for hp in "${!DISABLED[@]}"; do
+            off_port "$hp"; MISS[$hp]=0; GRACE[$hp]=0
+            if [[ -z ${SOLO_OFF[$hp]:-} ]]; then
+                echo "[autorevive] socket $hp disabled (solo) -> power OFF, no revive"; SOLO_OFF[$hp]=1
+            fi
+        done
+        for hp in "${!SOLO_OFF[@]}"; do
+            if [[ -z ${DISABLED[$hp]:-} ]]; then
+                echo "[autorevive] socket $hp re-enabled -> power ON"; on_port "$hp"; unset 'SOLO_OFF[$hp]'
+            fi
+        done
         mapfile -t missing < <(missing_ports)
         declare -A seen=()
         for hp in "${missing[@]:-}"; do
             [[ -z $hp ]] && continue
             seen[$hp]=1
+            [[ -n ${DISABLED[$hp]:-} ]] && continue   # solo: deliberately off -> never revive
             if (( ${GRACE[$hp]:-0} > 0 )); then    # just cycled -> still booting, do NOT re-cut
                 GRACE[$hp]=$(( GRACE[$hp] - 1 )); MISS[$hp]=0; continue
             fi

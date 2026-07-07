@@ -61,6 +61,10 @@ class GoProManagerNode(Node):
             'vbus_request_file', '/home/cosma_auv/swarm-vehicle/gopro_scripts/.revive_request')
         self.declare_parameter(                                      # persists the "was recording" intent
             'state_file', '/home/cosma_auv/swarm-vehicle/gopro_scripts/.recording_intent')
+        self.declare_parameter(                                      # CLI drops a label (or "duo") here; the manager consumes it
+            'solo_request_file', '/home/cosma_auv/swarm-vehicle/gopro_scripts/.solo_request')
+        self.declare_parameter(                                      # manager writes the DISABLED sockets here; the host watcher keeps them powered off
+            'solo_file', '/home/cosma_auv/swarm-vehicle/gopro_scripts/.solo')
 
         self.labels = [str(x) for x in self.get_parameter('camera_labels').value]
         self.expected = len(self.labels)
@@ -76,6 +80,8 @@ class GoProManagerNode(Node):
         self.vbus_recover_after = int(self.get_parameter('vbus_recover_after').value)
         self.vbus_cooldown = float(self.get_parameter('vbus_cooldown').value)
         self.vbus_request_file = str(self.get_parameter('vbus_request_file').value)
+        self.solo_request_file = str(self.get_parameter('solo_request_file').value)
+        self.solo_file = str(self.get_parameter('solo_file').value)
 
         # The Vbus-request and recording-intent files MUST land in a directory the
         # host watcher (revive.sh) also sees (a bind mount). If that directory is
@@ -93,6 +99,7 @@ class GoProManagerNode(Node):
         self._reviving_logged = set()   # expected labels logged as reviving while idle (log once until back)
         self._drop_episodes = {}        # label -> distinct drop episodes in the CURRENT take (reset on each record start)
         self._unreliable = set()        # labels that flapped too many times this take -> latched EMERGENCY until the take ends
+        self._disabled = set()          # labels deliberately powered off (solo mode): not expected, not revived, not an EMERGENCY
         self._strikes = {}
         self._grace_until = {}
         self._record_grace_until = 0.0   # post-(re)start encoder-init window; suppresses the all-lost emergency ONLY during a legitimate start, not a per-camera recovery
@@ -118,6 +125,8 @@ class GoProManagerNode(Node):
             GoProSystem, '~/system',
             QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
 
+        self._load_solo()   # a solo choice persists across a manager restart / reboot
+
         self.create_timer(float(self.get_parameter('tick_period').value), self._tick)
         self.create_timer(2.0, self._startup)
         self.create_timer(5.0, self._rescan)
@@ -135,6 +144,8 @@ class GoProManagerNode(Node):
         if self._started:
             return
         cams = self._discover()
+        if self._disabled:                          # solo: don't wait for / adopt a deliberately-off camera
+            cams = [c for c in cams if c.label not in self._disabled]
         if len(cams) != len(self.cameras):
             self._set_cameras(cams)
             if cams:
@@ -144,7 +155,7 @@ class GoProManagerNode(Node):
             return                                  # USB not up yet -- keep scanning
         if self._first_seen is None:
             self._first_seen = time.monotonic()
-        have_all = len(self.cameras) >= self.expected
+        have_all = len(self.cameras) >= self.expected - len(self._disabled)
         waited = time.monotonic() - self._first_seen
         if not have_all and waited < self.discovery_timeout:
             return                                  # give the other camera(s) time to appear
@@ -213,6 +224,8 @@ class GoProManagerNode(Node):
         if not self._started:
             return
         found = self._discover()
+        if self._disabled:                          # solo: a powered-off camera is treated as absent
+            found = [c for c in found if c.label not in self._disabled]
 
         if self.recording:
             known = {c.ip for c in self.cameras}
@@ -281,6 +294,8 @@ class GoProManagerNode(Node):
         # uses `recovering` -> `EMERGENCY` instead.)
         present_now = {c.label for c in self.cameras}
         for lbl in self.labels:
+            if lbl in self._disabled:               # solo: deliberately off, not "missing"
+                continue
             if lbl not in present_now and lbl not in self._reviving_logged:
                 self.get_logger().warn(f'[{lbl}] reviving')
                 self._reviving_logged.add(lbl)
@@ -292,9 +307,10 @@ class GoProManagerNode(Node):
             self._publish(self._snapshot())
 
     def _arm_all(self):
-        if len(self.cameras) < self.expected:
+        want = self.expected - len(self._disabled)   # solo: don't count the powered-off camera as missing
+        if len(self.cameras) < want:
             self.get_logger().warn(
-                f'Only {len(self.cameras)}/{self.expected} camera(s) found -- arming those.')
+                f'Only {len(self.cameras)}/{want} camera(s) found -- arming those.')
         if not system_clock_synced():
             self.get_logger().warn('clock not synced (camera time set at record)')
         for cam in self.cameras:
@@ -544,9 +560,108 @@ class GoProManagerNode(Node):
         return response
 
     # =====================================================================
+    # Solo mode (deliberately run on ONE camera; power the other off)
+    # =====================================================================
+    def _consume_solo_request(self):
+        """The CLI (gopro_ctl.sh solo/duo) drops a label (or "duo") into
+        solo_request_file. Consume it here -- on the manager's own thread, so it
+        alone touches the disabled set -- once per request."""
+        if not os.path.exists(self.solo_request_file):
+            return
+        try:
+            with open(self.solo_request_file) as f:
+                token = f.read().strip()
+            open(self.solo_request_file, 'w').close()   # consume: one action per request
+        except OSError:
+            return
+        if token:
+            self._apply_solo(token)
+
+    def _socket_of(self, label):
+        """The USB socket (hub, port) for a label: a present camera's live socket,
+        else the last-known socket for that label -- so we can still power off a
+        camera that has already dropped, as long as it was seen once this boot."""
+        cam = next((c for c in self.cameras if c.label == label), None)
+        if cam is not None and cam.hub and cam.port:
+            return (cam.hub, cam.port)
+        for slot, lbl in self._label_by_slot.items():
+            if lbl == label:
+                return slot
+        return None
+
+    def _write_solo_file(self, sockets=None):
+        """Publish the disabled sockets to solo_file for the host watcher
+        ('hub:port LABEL' per line). Empty file = duo (nothing disabled)."""
+        try:
+            with open(self.solo_file, 'w') as f:
+                for lbl, hp in (sockets or {}).items():
+                    f.write(f'{hp} {lbl}\n')
+        except OSError as e:
+            self.get_logger().error(f'solo: could not write {self.solo_file}: {e}')
+
+    def _load_solo(self):
+        """Re-adopt a solo choice that persisted across a restart/reboot."""
+        try:
+            with open(self.solo_file) as f:
+                for ln in f:
+                    parts = ln.split()
+                    if len(parts) >= 2:
+                        self._disabled.add(parts[1])
+        except OSError:
+            return
+        if self._disabled:
+            active = '/'.join(l for l in self.labels if l not in self._disabled)
+            self.get_logger().warn(
+                f'solo persisted -- only {active} active (disabled {"/".join(sorted(self._disabled))})')
+
+    def _apply_solo(self, token):
+        """Act on a solo/duo request. 'duo' re-enables everything; a label keeps
+        only that camera and powers the other(s) off -- but NEVER a camera that is
+        actually recording, and never one whose socket we have never seen."""
+        t = token.strip().upper()
+        if t in ('DUO', 'OFF'):
+            if self._disabled:
+                for lbl in sorted(self._disabled):
+                    self.get_logger().info(f'[{lbl}] solo off -- re-enabled')
+            self._disabled.clear()
+            self._write_solo_file()          # empty -> watcher powers all back on
+            return
+        if t not in self.labels:
+            self.get_logger().warn(
+                f"solo: unknown camera '{token}' (expected {'/'.join(self.labels)} or duo)")
+            return
+        keep = t
+        sockets, new_disabled = {}, set()
+        for lbl in self.labels:
+            if lbl == keep:
+                continue
+            slot = self._socket_of(lbl)
+            if slot is None:
+                self.get_logger().warn(f'solo: socket of {lbl} unknown (never seen) -- not cutting it')
+                continue
+            cam = next((c for c in self.cameras if c.label == lbl), None)
+            if cam is not None and cam.recording_now():
+                self.get_logger().warn(f'[{lbl}] solo refused -- it is recording (stop it first)')
+                continue
+            sockets[lbl] = f'{slot[0]}:{slot[1]}'
+            new_disabled.add(lbl)
+        if not new_disabled:
+            self.get_logger().warn(f'solo {keep}: nothing to disable -- aborted')
+            return
+        self._disabled = new_disabled
+        self._reviving_logged -= new_disabled
+        self.cameras = [c for c in self.cameras if c.label not in new_disabled]
+        self._ready -= new_disabled
+        self._write_solo_file(sockets)       # watcher cuts these sockets' Vbus
+        for lbl in sorted(new_disabled):
+            self.get_logger().info(f'[{lbl}] solo off -- powering down')
+        self.get_logger().info(f'[{keep}] solo -- only active camera')
+
+    # =====================================================================
     # Periodic tick: snapshot -> watchdog -> publish
     # =====================================================================
     def _tick(self):
+        self._consume_solo_request()   # apply any pending solo/duo command first
         snapshot = self._snapshot()
         if self.recording:
             now = time.monotonic()
@@ -722,7 +837,11 @@ class GoProManagerNode(Node):
         # graces: a single freshly re-appeared camera's recovery grace used to mask
         # this emergency for the genuinely-dead ones (via max()) for up to
         # grace_period -- exactly when the vehicle most needs to hold.
-        all_lost = (self.recording and n > 0 and recording_now == 0
+        # Immediate "vehicle must hold" only makes sense when we HAD several cameras
+        # and they ALL vanished at once. A single-camera take (or solo mode) instead
+        # goes through the patient recovery path -- one drop should not instantly
+        # emergency, it should get its recovery attempts / fault_after first.
+        all_lost = (self.recording and n >= 2 and recording_now == 0
                     and now >= self._record_grace_until)
         if self._faulted:
             self.state = GoProSystem.STATE_FAULT
