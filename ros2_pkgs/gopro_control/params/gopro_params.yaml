@@ -26,3 +26,4 @@ gopro_manager:
     # --- solo mode: run on ONE camera, power the other off (gopro_ctl.sh solo LEFT|RIGHT / duo) ---
     solo_request_file: "/home/cosma_auv/swarm-vehicle/gopro_scripts/.solo_request"     # CLI drops a label (or "duo") here; the manager consumes it
     solo_file: "/home/cosma_auv/swarm-vehicle/gopro_scripts/.solo"                     # manager writes the DISABLED sockets here; the host watcher (revive.sh) keeps them powered off
+    socket_labels_file: "/home/cosma_auv/swarm-vehicle/gopro_scripts/.socket_labels"   # manager writes socket->label so the watcher logs [LEFT]/[RIGHT] instead of "socket 2-2:2"

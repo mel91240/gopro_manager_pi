@@ -25,6 +25,7 @@ CONFIRM=3                     # consecutive scans a port must be empty before we
 SCAN=2                        # [s] between scans  (CONFIRM*SCAN = confirmation window)
 REQ="$(cd "$(dirname "$0")" && pwd)/.revive_request"   # manager writes "hub:port" here for a targeted Vbus cycle (on-bus capture-dead cam)
 SOLO="$(cd "$(dirname "$0")" && pwd)/.solo"            # manager writes "hub:port LABEL" per socket to keep POWERED OFF (solo mode); empty/absent = duo
+SOCKMAP="$(cd "$(dirname "$0")" && pwd)/.socket_labels" # manager writes "hub:port LABEL": lets us log [LEFT]/[RIGHT] instead of a raw "socket 2-2:2"
 REQ_OFF=15                    # [s] Vbus OFF for a requested cycle (a capture-dead/black-but-lit cam needs a long cut, not the 8s of an off-bus blip)
 BOOT_SETTLE=30                # [s] after ANY cycle, ignore that socket's emptiness this long (it is booting/enumerating) -> never re-cut a camera mid-boot
 BOOT_SCANS=$(( (BOOT_SETTLE + SCAN - 1) / SCAN ))   # the above expressed in scan ticks
@@ -68,6 +69,12 @@ off_port() { local h=${1%:*} p=${1#*:}; sudo -n "$UHUBCTL" -l "$h" -p "$p" -a of
 on_port()  { local h=${1%:*} p=${1#*:}; sudo -n "$UHUBCTL" -l "$h" -p "$p" -a on  >/dev/null 2>&1; }
 # Sockets the manager marked as deliberately-off (solo mode): first field of each .solo line.
 solo_ports() { [[ -f $SOLO ]] && awk 'NF{print $1}' "$SOLO"; return 0; }
+# "hub:port" -> "[LEFT]"/"[RIGHT]" via the manager's map, else "[autorevive]" (socket unknown yet).
+label_of() {
+    local hp=$1 l=
+    [[ -f $SOCKMAP ]] && l=$(awk -v s="$hp" '$1==s{print $2; exit}' "$SOCKMAP")
+    [[ -n $l ]] && echo "[$l]" || echo "[autorevive]"
+}
 
 # The manager (no uhubctl in its container) drops a "hub:port" into $REQ to ask us to
 # Vbus-cycle a camera that is ON the bus but capture-dead (brown-out: /state 200 but
@@ -109,12 +116,12 @@ if [[ "${1:-}" == "--watch" ]]; then
         for hp in "${!DISABLED[@]}"; do
             off_port "$hp"; MISS[$hp]=0; GRACE[$hp]=0
             if [[ -z ${SOLO_OFF[$hp]:-} ]]; then
-                echo "[autorevive] socket $hp disabled (solo) -> power OFF, no revive"; SOLO_OFF[$hp]=1
+                echo "$(label_of "$hp") solo off -- power cut (socket $hp)"; SOLO_OFF[$hp]=1
             fi
         done
         for hp in "${!SOLO_OFF[@]}"; do
             if [[ -z ${DISABLED[$hp]:-} ]]; then
-                echo "[autorevive] socket $hp re-enabled -> power ON"; on_port "$hp"; unset 'SOLO_OFF[$hp]'
+                echo "$(label_of "$hp") solo end -- power on (socket $hp)"; on_port "$hp"; unset 'SOLO_OFF[$hp]'
             fi
         done
         mapfile -t missing < <(missing_ports)
@@ -128,7 +135,7 @@ if [[ "${1:-}" == "--watch" ]]; then
             fi
             MISS[$hp]=$(( ${MISS[$hp]:-0} + 1 ))
             if (( ${MISS[$hp]} >= CONFIRM )); then
-                echo "[autorevive] socket $hp empty for ${MISS[$hp]} scans -> power-cycle"
+                echo "$(label_of "$hp") power-cycle (socket $hp empty ${MISS[$hp]} scans)"
                 cycle_port "$hp"; MISS[$hp]=0
                 GRACE[$hp]=$BOOT_SCANS          # non-blocking boot grace (replaces the old blocking sleep 30)
             fi

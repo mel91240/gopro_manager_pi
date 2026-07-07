@@ -65,6 +65,8 @@ class GoProManagerNode(Node):
             'solo_request_file', '/home/cosma_auv/swarm-vehicle/gopro_scripts/.solo_request')
         self.declare_parameter(                                      # manager writes the DISABLED sockets here; the host watcher keeps them powered off
             'solo_file', '/home/cosma_auv/swarm-vehicle/gopro_scripts/.solo')
+        self.declare_parameter(                                      # manager publishes socket->label here so the host watcher can log [LEFT]/[RIGHT], not "socket 2-2:2"
+            'socket_labels_file', '/home/cosma_auv/swarm-vehicle/gopro_scripts/.socket_labels')
 
         self.labels = [str(x) for x in self.get_parameter('camera_labels').value]
         self.expected = len(self.labels)
@@ -82,6 +84,7 @@ class GoProManagerNode(Node):
         self.vbus_request_file = str(self.get_parameter('vbus_request_file').value)
         self.solo_request_file = str(self.get_parameter('solo_request_file').value)
         self.solo_file = str(self.get_parameter('solo_file').value)
+        self.socket_labels_file = str(self.get_parameter('socket_labels_file').value)
 
         # The Vbus-request and recording-intent files MUST land in a directory the
         # host watcher (revive.sh) also sees (a bind mount). If that directory is
@@ -144,6 +147,7 @@ class GoProManagerNode(Node):
         if self._started:
             return
         cams = self._discover()
+        self._write_socket_labels()                 # publish socket->label for the watcher's logs
         if self._disabled:                          # solo: don't wait for / adopt a deliberately-off camera
             cams = [c for c in cams if c.label not in self._disabled]
         if len(cams) != len(self.cameras):
@@ -224,7 +228,9 @@ class GoProManagerNode(Node):
         if not self._started:
             return
         found = self._discover()
+        self._write_socket_labels()                 # keep the watcher's socket->label map fresh
         if self._disabled:                          # solo: a powered-off camera is treated as absent
+            self._sync_solo_file()                  # a disabled cam that (re)appeared becomes cuttable
             found = [c for c in found if c.label not in self._disabled]
 
         if self.recording:
@@ -599,6 +605,30 @@ class GoProManagerNode(Node):
         except OSError as e:
             self.get_logger().error(f'solo: could not write {self.solo_file}: {e}')
 
+    def _sync_solo_file(self):
+        """(Re)write .solo with the socket of every disabled label we can resolve,
+        so a disabled camera gets its Vbus cut even if its socket was unknown when
+        the solo was requested (it becomes known the moment it appears on the bus)."""
+        sockets = {}
+        for lbl in self._disabled:
+            slot = self._socket_of(lbl)
+            if slot is not None:
+                sockets[lbl] = f'{slot[0]}:{slot[1]}'
+        self._write_solo_file(sockets)
+
+    def _write_socket_labels(self):
+        """Publish the socket->label map so the host watcher can log [LEFT]/[RIGHT]
+        instead of a raw 'socket 2-2:2'. Atomic (temp + rename) since the watcher
+        reads it on every scan."""
+        tmp = self.socket_labels_file + '.tmp'
+        try:
+            with open(tmp, 'w') as f:
+                for (hub, port), lbl in self._label_by_slot.items():
+                    f.write(f'{hub}:{port} {lbl}\n')
+            os.replace(tmp, self.socket_labels_file)
+        except OSError:
+            pass
+
     def _load_solo(self):
         """Re-adopt a solo choice that persisted across a restart/reboot."""
         try:
@@ -616,8 +646,11 @@ class GoProManagerNode(Node):
 
     def _apply_solo(self, token):
         """Act on a solo/duo request. 'duo' re-enables everything; a label keeps
-        only that camera and powers the other(s) off -- but NEVER a camera that is
-        actually recording, and never one whose socket we have never seen."""
+        only that camera and disables the other(s). A disabled camera on the bus
+        gets its Vbus cut; one already absent is simply no longer expected (nothing
+        to cut -- solo still engages, so it stops being revived / raising EMERGENCY).
+        The ONE thing we refuse is disabling a camera that is actually recording --
+        stop it first, so a take is never severed."""
         t = token.strip().upper()
         if t in ('DUO', 'OFF'):
             if self._disabled:
@@ -631,30 +664,26 @@ class GoProManagerNode(Node):
                 f"solo: unknown camera '{token}' (expected {'/'.join(self.labels)} or duo)")
             return
         keep = t
-        sockets, new_disabled = {}, set()
+        disabled = set()
         for lbl in self.labels:
             if lbl == keep:
-                continue
-            slot = self._socket_of(lbl)
-            if slot is None:
-                self.get_logger().warn(f'solo: socket of {lbl} unknown (never seen) -- not cutting it')
                 continue
             cam = next((c for c in self.cameras if c.label == lbl), None)
             if cam is not None and cam.recording_now():
                 self.get_logger().warn(f'[{lbl}] solo refused -- it is recording (stop it first)')
                 continue
-            sockets[lbl] = f'{slot[0]}:{slot[1]}'
-            new_disabled.add(lbl)
-        if not new_disabled:
+            disabled.add(lbl)
+        if not disabled:
             self.get_logger().warn(f'solo {keep}: nothing to disable -- aborted')
             return
-        self._disabled = new_disabled
-        self._reviving_logged -= new_disabled
-        self.cameras = [c for c in self.cameras if c.label not in new_disabled]
-        self._ready -= new_disabled
-        self._write_solo_file(sockets)       # watcher cuts these sockets' Vbus
-        for lbl in sorted(new_disabled):
-            self.get_logger().info(f'[{lbl}] solo off -- powering down')
+        self._disabled = disabled
+        self._reviving_logged -= disabled
+        self.cameras = [c for c in self.cameras if c.label not in disabled]
+        self._ready -= disabled
+        self._sync_solo_file()               # cut the sockets we know; the rest are already absent
+        for lbl in sorted(disabled):
+            where = 'powering down' if self._socket_of(lbl) else 'already absent'
+            self.get_logger().info(f'[{lbl}] solo off -- {where}')
         self.get_logger().info(f'[{keep}] solo -- only active camera')
 
     # =====================================================================
@@ -893,7 +922,8 @@ class GoProManagerNode(Node):
             elif all_lost:
                 culprits = {c.label: 'no camera filming' for c in self.cameras}
             elif self._recovering:
-                culprits = {lbl: 'recovery failed' for lbl in self._recovering}
+                culprits = {lbl: f'could not recover after {self._recover_attempts.get(lbl, 0)} tries'
+                            for lbl in self._recovering}
             # Flapping cameras stay named even once they film again, and their
             # reason wins over a transient "recovery failed".
             for lbl in self._unreliable:
