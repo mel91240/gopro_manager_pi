@@ -48,9 +48,10 @@ class GoProManagerNode(Node):
         self.declare_parameter('camera_labels', ['LEFT', 'RIGHT'])   # 1st label -> 1st USB socket in (hub,port) order: hub port 2 = LEFT, hub port 4 = RIGHT (this rig's wiring; serials end ...185 / ...575)
         self.declare_parameter('tick_period', 1.0)                   # status publish + watchdog period [s]
         self.declare_parameter('strikes_before_restart', 2)          # consecutive bad checks before acting
-        self.declare_parameter('fault_after_attempts', 2)            # failed recovery attempts on a recovering cam before escalating DEGRADED -> FAULT
+        self.declare_parameter('fault_after_attempts', 6)            # spaced recovery attempts on a recovering cam before escalating DEGRADED -> FAULT (6 x restart_cooldown ~= fault_after)
+        self.declare_parameter('unreliable_after', 3)                # distinct drop episodes for ONE cam within ONE take -> latched EMERGENCY (flapping camera)
         self.declare_parameter('record_grace_period', 10.0)          # [s] after start: encoder init, watchdog waits
-        self.declare_parameter('restart_cooldown', 0.0)              # [s] between recovery attempts (0 = every tick)
+        self.declare_parameter('restart_cooldown', 5.0)              # [s] between recovery attempts (a rebooting cam has time to return before the next is counted)
         self.declare_parameter('fault_after', 30.0)                  # [s] a cam lost this long -> mission compromised
         self.declare_parameter('discovery_timeout', 20.0)            # [s] wait for all cams to enumerate at boot
         self.declare_parameter('resume_on_restart', True)            # auto-resume recording after a reboot
@@ -65,6 +66,7 @@ class GoProManagerNode(Node):
         self.expected = len(self.labels)
         self.strikes_max = int(self.get_parameter('strikes_before_restart').value)
         self.fault_after_attempts = int(self.get_parameter('fault_after_attempts').value)
+        self.unreliable_after = int(self.get_parameter('unreliable_after').value)
         self.grace_period = float(self.get_parameter('record_grace_period').value)
         self.restart_cooldown = float(self.get_parameter('restart_cooldown').value)
         self.fault_after = float(self.get_parameter('fault_after').value)
@@ -88,6 +90,9 @@ class GoProManagerNode(Node):
         self.state = GoProSystem.STATE_INITIALIZING
         self.message = 'starting up'
         self._emergency_logged = set()  # labels already logged as EMERGENCY this episode (log once, not every tick)
+        self._reviving_logged = set()   # expected labels logged as reviving while idle (log once until back)
+        self._drop_episodes = {}        # label -> distinct drop episodes in the CURRENT take (reset on each record start)
+        self._unreliable = set()        # labels that flapped too many times this take -> latched EMERGENCY until the take ends
         self._strikes = {}
         self._grace_until = {}
         self._record_grace_until = 0.0   # post-(re)start encoder-init window; suppresses the all-lost emergency ONLY during a legitimate start, not a per-camera recovery
@@ -266,6 +271,23 @@ class GoProManagerNode(Node):
             self._cooldown_until[cam.label] = now + self.restart_cooldown
             if self._arm(cam):                      # came back / swapped -> re-arm to READY
                 dirty = True
+
+        # Idle visibility: an expected camera absent from the bus is being brought
+        # back by the host auto-revive watcher (it power-cycles the empty socket).
+        # Say so once in the uniform per-camera stream -- `[RIGHT] reviving` -- so
+        # the operator is not left reading only the watcher's raw socket line;
+        # `[RIGHT] found` / `armed` then close the loop when it returns. (This runs
+        # only when idle: _rescan returns early while recording, where the watchdog
+        # uses `recovering` -> `EMERGENCY` instead.)
+        present_now = {c.label for c in self.cameras}
+        for lbl in self.labels:
+            if lbl not in present_now and lbl not in self._reviving_logged:
+                self.get_logger().warn(f'[{lbl}] reviving')
+                self._reviving_logged.add(lbl)
+        for lbl in list(self._reviving_logged):
+            if lbl in present_now:
+                self._reviving_logged.discard(lbl)
+
         if dirty:
             self._publish(self._snapshot())
 
@@ -432,6 +454,8 @@ class GoProManagerNode(Node):
             self._recovering.clear()
             self._recover_attempts.clear()
             self._faulted.clear()
+            self._drop_episodes = {c.label: 0 for c in self.cameras}  # new take -> fresh flapping count
+            self._unreliable.clear()
             grace = time.monotonic() + self.grace_period   # encoder-init grace
             self._record_grace_until = grace
             for c in self.cameras:
@@ -556,6 +580,13 @@ class GoProManagerNode(Node):
                         self.get_logger().warn(f'[{cam.label}] unreachable')
                     else:
                         self.get_logger().warn(f'[{cam.label}] not filming')
+                    # A new drop episode for this take. Count it; a camera that
+                    # flaps unreliable_after times is declared unreliable and
+                    # latches EMERGENCY for the rest of the take (even if it keeps
+                    # coming back), because footage from it can't be trusted.
+                    self._drop_episodes[cam.label] = self._drop_episodes.get(cam.label, 0) + 1
+                    if self._drop_episodes[cam.label] >= self.unreliable_after:
+                        self._unreliable.add(cam.label)
                 if (self._strikes[cam.label] >= self.strikes_max
                         and now >= self._cooldown_until[cam.label]):
                     self._recover(cam, now)
@@ -700,6 +731,13 @@ class GoProManagerNode(Node):
         elif all_lost:
             self.state = GoProSystem.STATE_FAULT
             self.message = 'MISSION COMPROMISED -- no camera filming (vehicle should hold)'
+        elif self._unreliable:
+            # A camera flapped too many times this take: latched EMERGENCY even if
+            # it is filming again right now (its footage can't be trusted). Clears
+            # only when a new take starts.
+            names = ', '.join(sorted(self._unreliable))
+            self.state = GoProSystem.STATE_FAULT
+            self.message = f'MISSION COMPROMISED -- {names} unreliable (flapping this take)'
         elif self._recovering:
             labels = sorted(self._recovering)
             worst = max(now - t for t in self._recovering.values())
@@ -729,15 +767,18 @@ class GoProManagerNode(Node):
         # Human channel: name the EMERGENCY culprit(s) per camera, once per episode.
         # The aggregate state itself still rides the ~/system topic for the nav; here
         # we only surface it to a human reviewing journalctl at the surface.
+        culprits = {}
         if self.state == GoProSystem.STATE_FAULT:
             if self._faulted:
                 culprits = dict(self._faulted)
             elif all_lost:
                 culprits = {c.label: 'no camera filming' for c in self.cameras}
-            else:
+            elif self._recovering:
                 culprits = {lbl: 'recovery failed' for lbl in self._recovering}
-        else:
-            culprits = {}
+            # Flapping cameras stay named even once they film again, and their
+            # reason wins over a transient "recovery failed".
+            for lbl in self._unreliable:
+                culprits[lbl] = f'unreliable, {self._drop_episodes.get(lbl, 0)} drops'
         for lbl, why in culprits.items():
             if lbl not in self._emergency_logged:
                 self.get_logger().error(f'[{lbl}] EMERGENCY ({why})')
