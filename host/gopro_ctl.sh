@@ -43,7 +43,9 @@ topic_once() {  # $1=topic
         source /home/cosma_auv/swarm-vehicle/ros2_ws/install/setup.bash
         export ROS_DOMAIN_ID=0 ROS_LOCALHOST_ONLY=1
         export FASTRTPS_DEFAULT_PROFILES_FILE=/home/cosma_auv/swarm-vehicle/gopro_scripts/fastdds_udp_only.xml
-        exec timeout 5 ros2 topic echo --once "$TOPIC"'
+        # ~/system is latched (transient-local) -- request the same durability so we
+        # get the last published state at once, even on a stable idle rig.
+        exec timeout 8 ros2 topic echo --once --qos-durability transient_local "$TOPIC"'
 }
 
 usage() {

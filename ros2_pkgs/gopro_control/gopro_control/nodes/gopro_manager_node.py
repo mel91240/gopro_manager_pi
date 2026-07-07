@@ -29,6 +29,7 @@ import time
 import rclpy
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile
 from std_srvs.srv import SetBool
 
 from gopro_msgs.msg import GoProStatus, GoProSystem
@@ -104,7 +105,13 @@ class GoProManagerNode(Node):
         self.create_service(SetBool, '~/record', self._on_record)
         self.create_service(GoProSettings, '~/settings', self._on_settings)
         self.status_pub = self.create_publisher(GoProStatus, '~/status', 10)
-        self.system_pub = self.create_publisher(GoProSystem, '~/system', 10)
+        # ~/system is LATCHED (transient-local, depth 1): it is published only on a
+        # state change, so a late-joining reader -- the nav, or `gopro_ctl.sh status`
+        # querying an idle-but-stable rig -- must still get the current state
+        # immediately instead of waiting (forever) for the next change.
+        self.system_pub = self.create_publisher(
+            GoProSystem, '~/system',
+            QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
 
         self.create_timer(float(self.get_parameter('tick_period').value), self._tick)
         self.create_timer(2.0, self._startup)
@@ -461,14 +468,23 @@ class GoProManagerNode(Node):
         return self._reply(response, success, msg)
 
     def _on_settings(self, request, response):
-        """gopro_msgs/GoProSettings: apply the same capture settings to all cameras."""
+        """gopro_msgs/GoProSettings: apply the same capture settings to all cameras.
+
+        Each camera gets exactly one journalctl line -- `[LABEL] settings applied`
+        or `[LABEL] settings not applied (why)` -- so a reviewer at the surface can
+        tell, per camera, whether the change took and why it did not.
+        """
         if self.recording:
+            for lbl in self.labels:
+                self.get_logger().warn(f'[{lbl}] settings not applied (recording)')
             return self._reply(response, False, 'Cannot change settings while recording. Stop first ([2]).')
 
         err = gp_settings.validate(
             camera_mode=request.camera_mode, resolution=request.resolution, fps=request.fps,
             fov=request.fov, hypersmooth=request.hypersmooth, wind_reduction=request.wind_reduction)
         if err:
+            for lbl in self.labels:
+                self.get_logger().warn(f'[{lbl}] settings not applied ({err})')
             return self._reply(response, False, f'Rejected: {err}.')
 
         details, oks = [], []
@@ -479,12 +495,15 @@ class GoProManagerNode(Node):
                 wind_reduction=request.wind_reduction)
             if ok:
                 oks.append(cam.label)
+                self.get_logger().info(f'[{cam.label}] settings applied')
             else:
                 details.append(f'{cam.label}: {detail}')
+                self.get_logger().warn(f'[{cam.label}] settings not applied ({detail})')
         present = {c.label for c in self.cameras}
         for lbl in self.labels:                       # expected sockets with no camera present
             if lbl not in present:
                 details.append(f'{lbl}: absent (not applied)')
+                self.get_logger().warn(f'[{lbl}] settings not applied (absent)')
         all_ok = (not details) and (len(oks) == self.expected)
         if all_ok:
             msg = f'Settings applied on all {self.expected} cameras.'
