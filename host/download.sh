@@ -1,8 +1,8 @@
 #!/bin/bash
 # download.sh — offload GoPro footage -> USB SSD, reliably, on a Raspberry Pi 4 rig.
 #
-# Portable across Pi 4 units (same OS image): the SSD device node, log path and
-# hub ports are auto-detected, not hard-coded.
+# Portable across Pi 4 units (same OS image): the SSD device node and hub ports
+# are auto-detected, not hard-coded.
 #
 # Hard-won lessons baked in (see README / crash notes):
 #  * The Pi 4 has ONE USB3 controller (VL805) shared by the SSD + both cameras.
@@ -15,23 +15,31 @@
 #    script WARNS if that quirk is missing.
 #  * Cameras answer HTTP, not ICMP ping. Transfers are resumable: files already
 #    on the SSD are skipped, so re-running is always safe and just continues.
+#  * Progress + results go to journald (SyslogIdentifier "download"), NOT to a
+#    file in $HOME: watch them live -- grouped with the manager & auto-revive --
+#    via ./manager_log.sh.
 #
 # Usage:
 #   ./download.sh                 # all cameras -> $DEST (default /mnt/ssd), sequential, clips >= 10 s
 #   ./download.sh --minsec 0      # also grab clips shorter than 10 s
 #   ./download.sh --minsec 30     # different threshold (CLI wins over the default)
-# Env overrides: GOPRO_DEST, GOPRO_SSD_DEV, GOPRO_SSD_LABEL, GOPRO_MINSEC, GOPRO_LOG_DIR
+# Env overrides: GOPRO_DEST, GOPRO_SSD_DEV, GOPRO_SSD_LABEL, GOPRO_MINSEC, GOPRO_LOGTAG
 set -u
 
 DEST="${GOPRO_DEST:-/mnt/ssd}"
 MINSEC="${GOPRO_MINSEC:-10}"                 # ignore clips < 10 s by default
 HERE="$(cd "$(dirname "$0")" && pwd)"
-LOG="${GOPRO_LOG_DIR:-$HOME}/gopro_download_$(date +%Y%m%d_%H%M%S).log"
 MAX_PASSES=6
 UHUBCTL="$(command -v uhubctl || echo /usr/sbin/uhubctl)"
+TAG="${GOPRO_LOGTAG:-download}"           # journald SyslogIdentifier (grouped in ./manager_log.sh)
 EXTRA=("$@")
 
-log(){ echo "[$(date +%H:%M:%S)] $*" | tee -a "$LOG" ; }
+# Every line goes to the terminal AND to journald under "$TAG", so the whole run
+# is visible live via ./manager_log.sh (next to the manager & auto-revive) -- and
+# no log file is dropped in $HOME any more.
+log(){ echo "[$(date +%H:%M:%S)] $*"; logger -t "$TAG" -- "$*"; }
+# Forward a command's output: show it on the terminal + send each line to journald.
+logpipe(){ while IFS= read -r line; do printf '%s\n' "$line"; logger -t "$TAG" -- "$line"; done; }
 
 # --- Find the USB SSD partition (don't hard-code /dev/sda1: enumeration varies) ---
 detect_ssd(){
@@ -64,7 +72,7 @@ ensure_mount(){
   if mountpoint -q "$DEST"; then return 0; fi
   local dev; dev="$(detect_ssd)" || { log "ERREUR: aucun SSD USB exFAT trouve (branche-le, ou GOPRO_SSD_DEV=...)."; exit 1; }
   log "SSD non monte -> fsck + montage de $dev sur $DEST"
-  sudo fsck.exfat -y "$dev" >>"$LOG" 2>&1 || true
+  sudo fsck.exfat -y "$dev" 2>&1 | logpipe
   sudo mkdir -p "$DEST"
   sudo mount -o uid="$(id -u)",gid="$(id -g)",umask=022 "$dev" "$DEST" \
     && log "monte: $dev -> $DEST" || { log "ECHEC montage $dev sur $DEST"; exit 1; }
@@ -92,7 +100,7 @@ revive_cameras(){
       /Current status for hub/ { hub=$5 }
       /Port [0-9]+:.*GoPro/    { p=$2; sub(":","",p); print hub, p }' \
   | while read -r hub port; do
-      [ -n "$hub" ] && sudo "$UHUBCTL" -l "$hub" -p "$port" -a cycle -d 15 >>"$LOG" 2>&1
+      [ -n "$hub" ] && sudo "$UHUBCTL" -l "$hub" -p "$port" -a cycle -d 15 2>&1 | logpipe
     done
   log "revive: attente re-arm des cameras (~30s)"
   sleep 30
@@ -110,7 +118,7 @@ prev=-1
 for pass in $(seq 1 "$MAX_PASSES"); do
   log "=== passe $pass / $MAX_PASSES ==="
   # --minsec BEFORE EXTRA so a user-supplied --minsec on the CLI wins (argparse: last one applies)
-  python3 "$HERE/gopro_download.py" --sequential --minsec "$MINSEC" --dest "$DEST" "${EXTRA[@]}" 2>&1 | tee -a "$LOG"
+  python3 -u "$HERE/gopro_download.py" --sequential --minsec "$MINSEC" --dest "$DEST" "${EXTRA[@]}" 2>&1 | logpipe
   now=$(count)
   log "passe $pass: $now fichiers MP4 sur le SSD"
 
@@ -127,4 +135,4 @@ for pass in $(seq 1 "$MAX_PASSES"); do
 done
 
 log "=== BILAN: $(count) fichiers MP4, $(du -sh "$DEST" 2>/dev/null | cut -f1) sur $DEST ==="
-log "log complet: $LOG"
+log "termine — journal complet groupe dans ./manager_log.sh (identifiant 'download')."

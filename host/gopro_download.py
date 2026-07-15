@@ -347,13 +347,16 @@ class Progress:
 
 
 def _reporter(progress):
-    """Redraw the live status line ~3x/s. The bar/%/GB advance with every chunk
-    read, so a stable speed/ETA is normal -- but a genuinely STALLED camera (a
-    drop into "USB Connected" while the retry loop re-inits it) freezes the bytes
-    for up to READ_TIMEOUT seconds. Flag that explicitly so a stall reads as a
-    stall, not as a hang of the tool itself."""
+    """On a TTY: redraw a live status line ~3x/s. When output is PIPED (e.g. into
+    journald via download.sh), fall back to a clean permanent milestone line every
+    ~30s so a LOG shows progress DURING the copy without the 3x/s spam. The bar/%
+    /GB advance with every chunk read, so a stable speed/ETA is normal -- but a
+    genuinely STALLED camera (a drop into "USB Connected" while the retry loop
+    re-inits it) freezes the bytes for up to READ_TIMEOUT seconds. Flag that
+    explicitly so a stall reads as a stall, not as a hang of the tool itself."""
     last_done = -1
     last_move = time.monotonic()
+    last_log = last_move                   # non-TTY: first milestone ~30s in, not at t=0
     while not progress.stop:
         with progress.lock:
             cur = progress.done
@@ -364,10 +367,16 @@ def _reporter(progress):
         stalled = now - last_move
         if stalled > 3:
             line += f"  [stalled {int(stalled)}s -- recovering camera]"
-        with _print_lock:
-            sys.stdout.write("\r\033[K" + line)
-            sys.stdout.flush()
-        time.sleep(0.3)
+        if _TTY:
+            with _print_lock:
+                sys.stdout.write("\r\033[K" + line)
+                sys.stdout.flush()
+            time.sleep(0.3)
+        else:
+            if now - last_log >= 30:       # journald: one clean milestone every ~30s
+                _emit(line)
+                last_log = now
+            time.sleep(1.0)
 
 
 def _download_one(ip, label, f, dest, lock, c, progress=None):
@@ -462,10 +471,11 @@ def download_all(jobs, dest, lock=None, counters=None, parallel=False):
     total_bytes = sum(f["size"] for _, _, files in jobs for f in files)
     total_files = sum(len(files) for _, _, files in jobs)
     progress = Progress(total_bytes, total_files)
-    reporter = None
-    if _TTY:                              # live status line only makes sense on a terminal
-        reporter = threading.Thread(target=_reporter, args=(progress,), daemon=True)
-        reporter.start()
+    # Live status line on a TTY; a clean 30s milestone line when piped (into
+    # journald via download.sh). _reporter picks the mode from _TTY, so run it
+    # either way -- that is what makes a download's progress show in ./manager_log.sh.
+    reporter = threading.Thread(target=_reporter, args=(progress,), daemon=True)
+    reporter.start()
 
     def camera_worker(label, ip, files):
         gone = 0
@@ -496,8 +506,8 @@ def download_all(jobs, dest, lock=None, counters=None, parallel=False):
               "disk, then re-run (already-copied clips are skipped, partials resume).")
     finally:
         progress.stop = True
-        if reporter is not None:
-            reporter.join(timeout=1.0)
+        reporter.join(timeout=1.0)
+        if _TTY:                          # clear the live line only on a terminal
             with _print_lock:
                 sys.stdout.write("\r\033[K")
                 sys.stdout.flush()
