@@ -54,6 +54,23 @@ usage() {
     sed -n '2,19p' "$0" | sed 's/^# \?//'
 }
 
+# Printed on any settings error so the operator sees the valid values right in
+# the terminal, without looking them up. Mirrors core/settings.py -- keep in sync.
+settings_help() {
+    cat >&2 <<'EOF'
+
+Valid settings (pass only the fields you want to change):
+  resolution      1080p | 2.7K | 4K | 5.3K
+  fps             24 | 25 | 30 | 50 | 60 | 100 | 120 | 200 | 240
+  fov             Wide | SuperView | Linear | MaxSuperView | LinearLeveling | HyperView | LinearLock
+  hypersmooth     Off | On | AutoBoost
+  wind_reduction  Off | Auto | On
+  camera_mode     Video | Photo | Timelapse
+Constraints: 5.3K max 60fps | 4K max 120fps | HyperView needs 4K/5.3K | Photo has no fps/hypersmooth/wind.
+Example: ./gopro_ctl.sh settings resolution=4K fps=30 fov=Linear
+EOF
+}
+
 # Solo/duo are handled host-side: the CLI just drops the request in a file the
 # manager consumes (it alone knows label->socket and drives the watcher). No
 # docker exec needed -- gopro_ctl.sh lives in the shared handoff dir.
@@ -79,17 +96,23 @@ case "$cmd" in
         solo_request duo
         echo "duo requested -- both cameras re-enabled; watch ./manager_log.sh." ;;
     settings)
-        [ $# -gt 0 ] || { echo "usage: $0 settings key=value ...  (resolution fps fov hypersmooth wind_reduction camera_mode)"; exit 2; }
+        [ $# -gt 0 ] || { echo "usage: $0 settings key=value ...  (only the fields you want to change)"; settings_help; exit 2; }
         yaml=""
         for kv in "$@"; do
             k="${kv%%=*}"; v="${kv#*=}"
             case "$k" in
                 resolution|fps|fov|hypersmooth|wind_reduction|camera_mode) ;;
-                *) echo "!!! unknown field '$k' (allowed: resolution fps fov hypersmooth wind_reduction camera_mode)"; exit 2 ;;
+                *) echo "!!! unknown field '$k'"; settings_help; exit 2 ;;
             esac
             yaml="${yaml}${yaml:+, }${k}: '${v}'"
         done
-        svc_call "$NODE/settings" gopro_msgs/srv/GoProSettings "{$yaml}" ;;
+        out="$(svc_call "$NODE/settings" gopro_msgs/srv/GoProSettings "{$yaml}")"
+        printf '%s\n' "$out"
+        # The manager validates the values/combo (settings.py) and replies
+        # success=False on a bad value -- show the valid options so it can be fixed.
+        if printf '%s' "$out" | grep -qiE 'success=False|success: *false'; then
+            settings_help; exit 1
+        fi ;;
     help|-h|--help) usage ;;
     *) echo "unknown command '$cmd'. Try: record | stop | status | solo | duo | settings | help"; exit 2 ;;
 esac
