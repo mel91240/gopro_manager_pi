@@ -23,6 +23,7 @@ barrier inside the core, so both cameras fire within ~1ms of each other.
 
 All camera I/O lives in gopro_control.core; this node is the ROS 2 wrapper.
 """
+import glob
 import os
 import time
 
@@ -38,6 +39,47 @@ from gopro_msgs.srv import GoProSettings
 from gopro_control.core import settings as gp_settings
 from gopro_control.core.camera import (
     discover, set_recording, sync_datetime, system_clock_synced)
+
+# GoPro USB vendor id (Hero 12 enumerates as 2672:xxxx). Read straight from /sys so
+# we can tell, with NO blocking call, whether the cameras are still on the USB bus.
+_GOPRO_VID = '2672'
+
+
+def _gopros_on_usb():
+    """Count GoPro USB devices still ENUMERATED on the bus, by vendor id. A fast,
+    NON-BLOCKING /sys read -- unlike uhubctl, which HANGS when the VL805 controller is
+    wedged. Used only to name the likely cause in an EMERGENCY message, never to gate
+    the emergency itself. Returns -1 if /sys can't be read at all."""
+    try:
+        paths = glob.glob('/sys/bus/usb/devices/*/idVendor')
+    except OSError:
+        return -1
+    n = 0
+    for p in paths:
+        try:
+            with open(p) as fh:
+                if fh.read().strip() == _GOPRO_VID:
+                    n += 1
+        except OSError:
+            pass
+    return n
+
+
+def _bus_hint(lost_s):
+    """SHORT, honest USB-state hint for an EMERGENCY line. NON-BLOCKING /sys read (no
+    uhubctl). We do NOT claim the bus is wedged from a single reading: a replug / loose
+    contact ALSO leaves a camera 'present on USB but mute', and recovers in seconds. So
+    we only blame the bus/controller once the loss has PERSISTED (>~30s); before that we
+    stay silent -- no false alarm. Returns '' when there is nothing useful/safe to add.
+      lost_s: how long (s) the cameras have been down (0 if just now)."""
+    usb = _gopros_on_usb()
+    if usb < 0:
+        return ''
+    if usb == 0:
+        return 'off USB bus'                        # truly gone: unplug / power / cable
+    if lost_s >= 30:                                # present-but-mute AND sustained -> real wedge signature
+        return 'on USB but mute -> USB link lost (check hub cable)'  # STABLE text (no ticking seconds) so it re-logs once, not every tick
+    return ''                                        # present but only just dropped -> likely transient, stay silent
 
 
 class GoProManagerNode(Node):
@@ -98,7 +140,7 @@ class GoProManagerNode(Node):
         self.recording = False
         self.state = GoProSystem.STATE_INITIALIZING
         self.message = 'starting up'
-        self._emergency_logged = set()  # labels already logged as EMERGENCY this episode (log once, not every tick)
+        self._emergency_logged = {}  # label -> last EMERGENCY reason logged; re-log when the reason CHANGES (e.g. the "USB link lost" hint appears ~30s into a sustained loss)
         self._reviving_logged = set()   # expected labels logged as reviving while idle (log once until back)
         self._drop_episodes = {}        # label -> distinct drop episodes in the CURRENT take (reset on each record start)
         self._unreliable = set()        # labels that flapped too many times this take -> latched EMERGENCY until the take ends
@@ -909,13 +951,18 @@ class GoProManagerNode(Node):
         # Auto-clears the instant any camera films again.
         all_lost = (self.recording and n > 0 and recording_now == 0
                     and now >= self._record_grace_until)
+        # How long has the loss persisted (max per-camera down-time)? Lets us tell a
+        # transient (replug / loose contact -> back in seconds) from a real wedge.
+        lost_s = int(max((now - t for t in self._recovering.values()), default=0))
         if self._faulted:
             self.state = GoProSystem.STATE_FAULT
             reasons = ', '.join(f'{k} ({v})' for k, v in sorted(self._faulted.items()))
             self.message = f'MISSION COMPROMISED -- {reasons}'
         elif all_lost:
             self.state = GoProSystem.STATE_FAULT
-            self.message = 'MISSION COMPROMISED -- no camera filming (vehicle should hold)'
+            _h = _bus_hint(lost_s)
+            self.message = ('MISSION COMPROMISED -- no camera filming'
+                            + (f'; {_h}' if _h else '') + ' (vehicle should hold)')
         elif self._unreliable:
             # A camera flapped too many times this take: latched EMERGENCY even if
             # it is filming again right now (its footage can't be trusted). Clears
@@ -937,7 +984,11 @@ class GoProManagerNode(Node):
             if failed or worst >= self.fault_after:
                 self.state = GoProSystem.STATE_FAULT
                 why = 'recovery failed' if failed else f'lost {int(worst)}s'
-                self.message = f'MISSION COMPROMISED -- {labels} ({why}, still retrying)'
+                msg = f'MISSION COMPROMISED -- {labels} ({why}, still retrying)'
+                _h = _bus_hint(lost_s) if len(self._recovering) >= want else ''
+                if _h:                              # every expected camera down AND sustained -> name the likely bus cause
+                    msg += f' [{_h}]'
+                self.message = msg
             else:
                 self.state = GoProSystem.STATE_DEGRADED
                 self.message = f'{recording_now}/{want} recording, recovering {labels}'
@@ -962,24 +1013,28 @@ class GoProManagerNode(Node):
             if self._faulted:
                 culprits = dict(self._faulted)
             elif all_lost:
-                culprits = {lbl: 'no camera filming' for lbl in self.labels if lbl not in self._disabled}
+                _h = _bus_hint(lost_s)
+                why = 'no camera filming' + (f'; {_h}' if _h else '')
+                culprits = {lbl: why for lbl in self.labels if lbl not in self._disabled}
             elif self._recovering:
                 present_labels = {c.label for c in self.cameras}
-                culprits = {lbl: (f'missing after {self._recover_attempts.get(lbl, 0)} tries'
-                                  if lbl not in present_labels
-                                  else f'could not recover after {self._recover_attempts.get(lbl, 0)} tries')
+                _h = _bus_hint(lost_s) if len(self._recovering) >= want else ''
+                cause = f'; {_h}' if _h else ''
+                culprits = {lbl: ((f'missing after {self._recover_attempts.get(lbl, 0)} tries'
+                                   if lbl not in present_labels
+                                   else f'could not recover after {self._recover_attempts.get(lbl, 0)} tries') + cause)
                             for lbl in self._recovering}
             # Flapping cameras stay named even once they film again, and their
             # reason wins over a transient "recovery failed".
             for lbl in self._unreliable:
                 culprits[lbl] = f'unreliable, {self._drop_episodes.get(lbl, 0)} drops'
         for lbl, why in culprits.items():
-            if lbl not in self._emergency_logged:
+            if self._emergency_logged.get(lbl) != why:   # new fault, OR the reason changed (e.g. the "USB link lost" hint appears ~30s in)
                 self.get_logger().error(f'[{lbl}] EMERGENCY ({why})')
-                self._emergency_logged.add(lbl)
+                self._emergency_logged[lbl] = why
         for lbl in list(self._emergency_logged):
             if lbl not in culprits:
-                self._emergency_logged.discard(lbl)   # cleared -> a later fault logs again
+                del self._emergency_logged[lbl]           # cleared -> a later fault logs again
 
         self.system_pub.publish(GoProSystem(
             state=self.state, message=self.message, recording=self.recording,
