@@ -6,7 +6,7 @@
 # logic stays in charge. (Do NOT use core/cli.py for this: that one bypasses the
 # manager and drives the cameras directly, which fights the watchdog.)
 #
-#   ./gopro_ctl.sh record                 start recording on all cameras
+#   ./gopro_ctl.sh record  (or start)     start recording on all cameras (start = alias of record)
 #   ./gopro_ctl.sh stop                   stop recording
 #   ./gopro_ctl.sh status                 show state (READY/RECORDING + per-cam SD)
 #   ./gopro_ctl.sh solo LEFT|RIGHT        keep only that camera, power the other off
@@ -114,5 +114,5 @@ case "$cmd" in
             settings_help; exit 1
         fi ;;
     help|-h|--help) usage ;;
-    *) echo "unknown command '$cmd'. Try: record | stop | status | solo | duo | settings | help"; exit 2 ;;
+    *) echo "unknown command '$cmd'. Try: record (or start) | stop | status | solo | duo | settings | help"; exit 2 ;;
 esac
