@@ -87,14 +87,14 @@ class GoProManagerNode(Node):
         super().__init__('gopro_manager')
 
         # --- Parameters --------------------------------------------------
-        self.declare_parameter('camera_labels', ['LEFT', 'RIGHT'])   # 1st label -> 1st USB socket in (hub,port) order: hub port 2 = LEFT, hub port 4 = RIGHT (this rig's wiring; serials end ...185 / ...575)
+        self.declare_parameter('camera_labels', ['LEFT', 'RIGHT'])   # 1st label -> 1st USB socket in (hub,port) order (this rig: hub port 2 = LEFT, port 4 = RIGHT)
         self.declare_parameter('tick_period', 1.0)                   # status publish + watchdog period [s]
         self.declare_parameter('strikes_before_restart', 2)          # consecutive bad checks before acting
         self.declare_parameter('fault_after_attempts', 9)            # spaced recovery attempts before escalating DEGRADED -> FAULT (~45s): a power-cycle (~10s) + reboot (~25s) can finish before EMERGENCY
         self.declare_parameter('unreliable_after', 3)                # distinct drop episodes for ONE cam within ONE take -> latched EMERGENCY (flapping camera)
         self.declare_parameter('record_grace_period', 10.0)          # [s] after start: encoder init, watchdog waits
         self.declare_parameter('restart_cooldown', 5.0)              # [s] between recovery attempts (a rebooting cam has time to return before the next is counted)
-        self.declare_parameter('fault_after', 45.0)                  # [s] a cam lost this long -> mission compromised (gives a power-cycle + reboot time first)
+        self.declare_parameter('fault_after_seconds', 45.0)                  # [s] a cam lost this long -> mission compromised (gives a power-cycle + reboot time first)
         self.declare_parameter('discovery_timeout', 20.0)            # [s] wait for all cams to enumerate at boot
         self.declare_parameter('resume_on_restart', True)            # auto-resume recording after a reboot
         self.declare_parameter('vbus_recover_after', 3)              # failed soft re-arms before asking the host watcher for a Vbus cycle
@@ -117,7 +117,7 @@ class GoProManagerNode(Node):
         self.unreliable_after = int(self.get_parameter('unreliable_after').value)
         self.grace_period = float(self.get_parameter('record_grace_period').value)
         self.restart_cooldown = float(self.get_parameter('restart_cooldown').value)
-        self.fault_after = float(self.get_parameter('fault_after').value)
+        self.fault_after_seconds = float(self.get_parameter('fault_after_seconds').value)
         self.discovery_timeout = float(self.get_parameter('discovery_timeout').value)
         self.resume_on_restart = bool(self.get_parameter('resume_on_restart').value)
         self.state_file = str(self.get_parameter('state_file').value)
@@ -164,10 +164,10 @@ class GoProManagerNode(Node):
         self.create_service(SetBool, '~/record', self._on_record)
         self.create_service(GoProSettings, '~/settings', self._on_settings)
         self.status_pub = self.create_publisher(GoProStatus, '~/status', 10)
-        # ~/system is LATCHED (transient-local, depth 1): it is published only on a
-        # state change, so a late-joining reader -- the nav, or `gopro_ctl.sh status`
-        # querying an idle-but-stable rig -- must still get the current state
-        # immediately instead of waiting (forever) for the next change.
+        # ~/system is LATCHED (transient-local, depth 1): it is republished every tick
+        # (~1 Hz), and the latch keeps the LAST sample so a late-joining reader -- the
+        # nav, or `gopro_ctl.sh status` querying an idle-but-stable rig -- gets the
+        # current state at once instead of waiting for the next publish.
         self.system_pub = self.create_publisher(
             GoProSystem, '~/system',
             QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
@@ -175,7 +175,7 @@ class GoProManagerNode(Node):
         self._load_solo()   # a solo choice persists across a manager restart / reboot
 
         self.create_timer(float(self.get_parameter('tick_period').value), self._tick)
-        self.create_timer(2.0, self._startup)
+        self._startup_timer = self.create_timer(2.0, self._startup)
         self.create_timer(5.0, self._rescan)
         self.create_timer(15.0, self._enforce_auto_power_off)   # keep Auto Power Off = Never
 
@@ -189,6 +189,7 @@ class GoProManagerNode(Node):
         short window for every expected camera to enumerate, then arm whatever is
         present (so one missing camera doesn't block the others forever)."""
         if self._started:
+            self._startup_timer.cancel()   # startup done -> stop this 2 s retry timer
             return
         cams = self._discover()
         self._write_socket_labels()                 # publish socket->label for the watcher's logs
@@ -467,7 +468,7 @@ class GoProManagerNode(Node):
         # QUIETLY (no shutter test, no beep loop). Only when the camera actually
         # answers: a failed state read returns None and must NOT fault a good cam.
         st = cam.state()
-        if st is not None and not cam._sd_usable(st):
+        if st is not None and not cam.sd_usable(st):
             self._faulted[cam.label] = 'SD missing/full/unformatted'
             self._ready.discard(cam.label)
             self.get_logger().error(
@@ -627,7 +628,8 @@ class GoProManagerNode(Node):
         try:
             with open(self.solo_request_file) as f:
                 token = f.read().strip()
-            open(self.solo_request_file, 'w').close()   # consume: one action per request
+            with open(self.solo_request_file, 'w'):     # consume: one action per request (truncate)
+                pass
         except OSError:
             return
         if token:
@@ -772,7 +774,7 @@ class GoProManagerNode(Node):
                     continue
                 # Camera dropped out of recording. Flag it right away (so the
                 # operator is warned live) and keep trying to recover it.
-                self._strikes[cam.label] += 1
+                self._strikes[cam.label] = self._strikes.get(cam.label, 0) + 1
                 self._recovering.setdefault(cam.label, now)
                 if self._strikes[cam.label] == 1:
                     # Distinct, unambiguous verbs:
@@ -833,8 +835,8 @@ class GoProManagerNode(Node):
             try:
                 if cam.ensure_auto_power_off_never():
                     self.get_logger().info(f'[{cam.label}] Auto Power Off drifted -> re-set to Never.')
-            except Exception:
-                pass
+            except Exception as e:
+                self.get_logger().debug(f'[{cam.label}] auto-power-off check failed: {e}')
 
     def _recover(self, cam, now):
         """Bring a dropped camera back: re-arm (out of USB-connected mode) and
@@ -936,19 +938,15 @@ class GoProManagerNode(Node):
         n = len(self.cameras)                       # cameras PRESENT on the bus
         want = self.expected - len(self._disabled)  # cameras we SHOULD have (2 duo, 1 solo) -- the source of truth for "is the rig complete"
         now = time.monotonic()
-        # Recording, but NOTHING is being filmed (every camera dropped at once)?
-        # Immediate emergency -- don't wait fault_after: the vehicle must hold
-        # position because we are no longer capturing. Auto-clears the instant
-        # any camera resumes. Suppressed ONLY during the post-(re)start encoder-init
-        # window (_record_grace_until). Deliberately NOT gated on the per-camera
-        # graces: a single freshly re-appeared camera's recovery grace used to mask
-        # this emergency for the genuinely-dead ones (via max()) for up to
-        # grace_period -- exactly when the vehicle most needs to hold.
-        # Nothing is being filmed while recording -> we are capturing NOTHING, so the
-        # vehicle must hold NOW: whether it is the ONLY (solo) camera dropping or both
-        # duo cameras vanishing at once. A duo take that still has one camera filming
-        # is recording_now>=1 -> NOT all_lost -> the dropped one gets patient recovery.
-        # Auto-clears the instant any camera films again.
+        # all_lost = recording but NOTHING is being filmed (the only solo camera, or
+        # both duo cameras, dropped at once) -> immediate EMERGENCY: hold position, we
+        # are capturing nothing. (A duo take with one camera still filming is
+        # recording_now>=1 -> NOT all_lost -> the dropped one gets patient recovery.)
+        # Auto-clears the instant any camera films again. Suppressed only during the
+        # post-(re)start encoder-init window (_record_grace_until), and deliberately
+        # NOT gated on the per-camera recovery graces -- a single re-appeared camera's
+        # grace used to mask this (via max()) for the genuinely-dead ones, exactly when
+        # the vehicle most needs to hold.
         all_lost = (self.recording and n > 0 and recording_now == 0
                     and now >= self._record_grace_until)
         # How long has the loss persisted (max per-camera down-time)? Lets us tell a
@@ -977,11 +975,11 @@ class GoProManagerNode(Node):
             # still in flight -> the AUV may slow down. It escalates to FAULT (the
             # AUV should stop) once a SECOND attempt has failed (one failed retry is
             # often just a transient re-enumeration), while we keep retrying.
-            # Backstop: FAULT anyway if a camera has been lost past fault_after.
+            # Backstop: FAULT anyway if a camera has been lost past fault_after_seconds.
             # FAULT self-clears the instant the camera records again.
             failed = any(self._recover_attempts.get(l, 0) >= self.fault_after_attempts
                          for l in self._recovering)
-            if failed or worst >= self.fault_after:
+            if failed or worst >= self.fault_after_seconds:
                 self.state = GoProSystem.STATE_FAULT
                 why = 'recovery failed' if failed else f'lost {int(worst)}s'
                 msg = f'MISSION COMPROMISED -- {labels} ({why}, still retrying)'

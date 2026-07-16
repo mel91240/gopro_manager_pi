@@ -11,7 +11,7 @@ gopro_manager:
     unreliable_after: 3                # distinct drop episodes for ONE camera within ONE take -> latched EMERGENCY (flapping camera declared unreliable)
     record_grace_period: 10.0          # [s] after start: encoder init time, watchdog stays quiet
     restart_cooldown: 5.0              # [s] min delay between soft restarts -> a re-armed/rebooting camera has time to come back before the next attempt is counted
-    fault_after: 45.0                  # [s] a camera lost this long -> mission compromised (EMERGENCY) -- gives a power-cycle + reboot time to bring it back first
+    fault_after_seconds: 45.0                  # [s] a camera lost this long -> mission compromised (EMERGENCY) -- gives a power-cycle + reboot time to bring it back first
     discovery_timeout: 20.0            # [s] wait for all cameras to enumerate at boot
     resume_on_restart: true            # auto-resume recording after a Pi reboot (mid-mission)
     # --- brown-out (capture-dead) recovery: ask the host watcher for a Vbus cycle ---

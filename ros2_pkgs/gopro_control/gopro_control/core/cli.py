@@ -13,7 +13,8 @@ from __future__ import annotations
 import sys
 import time
 
-from .camera import GoPro, discover
+from .camera import (GoPro, discover, ST_BATTERY, ST_BUSY, ST_ENCODING,
+                     ST_SD, ST_SPACE_KB)
 
 
 def _find(cams: list[GoPro], label: str) -> GoPro | None:
@@ -25,40 +26,40 @@ def _find(cams: list[GoPro], label: str) -> GoPro | None:
 
 def cmd_discover(cams: list[GoPro]) -> int:
     if not cams:
-        print("Aucune GoPro trouvée.")
+        print("No GoPro found.")
         return 1
     for c in cams:
-        print(f"  {c.label:6} ip={c.ip:16} power={'oui' if c.can_power_cycle() else 'NON'}"
+        print(f"  {c.label:6} ip={c.ip:16} power={'yes' if c.can_power_cycle() else 'NO'}"
               f" ({c.hub}/p{c.port})  iface={c.iface}")
     return 0
 
 
 def cmd_status(cams: list[GoPro]) -> int:
-    sd = {0: "OK", 1: "PLEINE", 2: "ABSENTE", 3: "A-FORMATER", 4: "BUSY"}
+    sd = {0: "OK", 1: "FULL", 2: "MISSING", 3: "NEEDS-FORMAT", 4: "BUSY"}
     for c in cams:
         st = c.state()
         if st is None:
-            print(f"  {c.label:6} INJOIGNABLE")
+            print(f"  {c.label:6} UNREACHABLE")
             continue
-        space_gb = (st.get("54") or 0) / 1e6
-        print(f"  {c.label:6} batt={st.get('1')} sd={sd.get(st.get('33'),'?')}"
-              f" libre={space_gb:.0f}GB encoding={st.get('10')} busy={st.get('8')}")
+        space_gb = (st.get(ST_SPACE_KB) or 0) / 1e6
+        print(f"  {c.label:6} batt={st.get(ST_BATTERY)} sd={sd.get(st.get(ST_SD),'?')}"
+              f" free={space_gb:.0f}GB encoding={st.get(ST_ENCODING)} busy={st.get(ST_BUSY)}")
     return 0
 
 
 def cmd_record(cams: list[GoPro], secs: float) -> int:
-    print("Init…")
+    print("Init...")
     for c in cams:
         ok = c.init()
-        print(f"  {c.label}: init {'OK' if ok else 'ECHEC'}")
-    print(f"START simultané ({secs}s)…")
+        print(f"  {c.label}: init {'OK' if ok else 'FAILED'}")
+    print(f"Simultaneous START ({secs}s)...")
     results = {c.label: c.start() for c in cams}
     for label, ok in results.items():
-        print(f"  {label}: start {'OK' if ok else 'ECHEC (500?)'}")
+        print(f"  {label}: start {'OK' if ok else 'FAILED (500?)'}")
     time.sleep(secs)
     enc = {c.label: c.encoding() for c in cams}
-    print(f"  encoding pendant: {enc}")
-    print("STOP…")
+    print(f"  encoding during: {enc}")
+    print("STOP...")
     for c in cams:
         c.stop()
     return 0 if all(results.values()) else 1
@@ -67,25 +68,25 @@ def cmd_record(cams: list[GoPro], secs: float) -> int:
 def cmd_cycle(cams: list[GoPro], label: str) -> int:
     c = _find(cams, label)
     if not c:
-        print(f"Caméra '{label}' introuvable.")
+        print(f"Camera '{label}' not found.")
         return 1
     if not c.can_power_cycle():
-        print(f"{c.label}: pas de coupure d'alim possible (hub/port non résolu).")
+        print(f"{c.label}: no power-cut available (hub/port not resolved).")
         return 1
-    print(f"Power-cycle Vbus de {c.label} ({c.hub}/p{c.port})…")
+    print(f"Vbus power-cycle of {c.label} ({c.hub}/p{c.port})...")
     ok = c.power_cycle()
-    print(f"  -> {'revenue' if ok else 'TOUJOURS ABSENTE'} après reboot")
+    print(f"  -> {'came back' if ok else 'STILL MISSING'} after reboot")
     return 0 if ok else 1
 
 
 def cmd_recover(cams: list[GoPro], label: str) -> int:
     c = _find(cams, label)
     if not c:
-        print(f"Caméra '{label}' introuvable.")
+        print(f"Camera '{label}' not found.")
         return 1
-    print(f"Recovery de {c.label}…")
+    print(f"Recovery of {c.label}...")
     ok = c.recover()
-    print(f"  -> {'OK (enregistre de nouveau)' if ok else 'ECHEC'}")
+    print(f"  -> {'OK (recording again)' if ok else 'FAILED'}")
     return 0 if ok else 1
 
 
@@ -105,7 +106,7 @@ def main(argv: list[str]) -> int:
         return cmd_cycle(cams, rest[0]) if rest else 1
     if cmd == "recover":
         return cmd_recover(cams, rest[0]) if rest else 1
-    print(f"Commande inconnue: {cmd}")
+    print(f"Unknown command: {cmd}")
     print(__doc__)
     return 1
 

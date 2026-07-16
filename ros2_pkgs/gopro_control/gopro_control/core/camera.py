@@ -33,11 +33,13 @@ UHUBCTL = "/usr/sbin/uhubctl"
 HTTP_PORT = 8080
 
 # Open GoPro status field IDs (from /gopro/camera/state -> "status")
+ST_BATTERY = "1"
 ST_BUSY = "8"
 ST_ENCODING = "10"
 ST_SD = "33"            # 0=OK 1=full 2=removed 3=needs-format 4=busy
 ST_REMAINING_PHOTOS = "34"
 ST_REMAINING_SEC = "35"  # remaining video seconds -- the RELIABLE "card usable" signal
+ST_SPACE_KB = "54"       # SD card space remaining, in KB
 
 PRESET_GROUP_VIDEO = 1000
 AUTO_POWER_OFF = 59          # Open GoPro setting id (Hero 12): Auto Power Off
@@ -178,7 +180,7 @@ class GoPro:
         return False
 
     @staticmethod
-    def _sd_usable(st: dict | None) -> bool:
+    def sd_usable(st: dict | None) -> bool:
         """Whether the SD card can actually be recorded to.
         Hero 12 quirk (fw 02.32.70): status 33 stays 0 even with no card or an
         unformatted/FTL-broken card -- the reliable signal is remaining video
@@ -190,7 +192,7 @@ class GoPro:
         return (st.get(ST_REMAINING_SEC) or 0) > 0 or (st.get(ST_REMAINING_PHOTOS) or 0) > 0
 
     def sd_present(self) -> bool:
-        return self._sd_usable(self.state())
+        return self.sd_usable(self.state())
 
     def set_setting(self, setting_id: int, option: int) -> bool:
         """Apply one Open GoPro setting (resolution, fps, fov, ...)."""
@@ -239,7 +241,7 @@ class GoPro:
             "reachable": st is not None,
             "recording": bool(st and st.get(ST_ENCODING) == 1),
             "busy": bool(st and st.get(ST_BUSY) == 1),   # SD/file op in progress
-            "sd_ok": self._sd_usable(st),
+            "sd_ok": self.sd_usable(st),
             "remaining_sec": (st.get(ST_REMAINING_SEC) if st else None),
             "can_power_cycle": self.can_power_cycle(),
         }
