@@ -37,9 +37,10 @@ EXTRA=("$@")
 # Every line goes to the terminal AND to journald under "$TAG", so the whole run
 # is visible live via ./manager_log.sh (next to the manager & auto-revive) -- and
 # no log file is dropped in $HOME any more.
-log(){ echo "[$(date +%H:%M:%S)] $*"; logger -t "$TAG" -- "$*"; }
+# -p user.info: journald shows the DEFAULT logger priority (notice) in BOLD; info is plain.
+log(){ echo "[$(date +%H:%M:%S)] $*"; logger -p user.info -t "$TAG" -- "$*"; }
 # Forward a command's output: show it on the terminal + send each line to journald.
-logpipe(){ while IFS= read -r line; do printf '%s\n' "$line"; logger -t "$TAG" -- "$line"; done; }
+logpipe(){ while IFS= read -r line; do printf '%s\n' "$line"; logger -p user.info -t "$TAG" -- "$line"; done; }
 
 # --- Find the USB SSD partition (don't hard-code /dev/sda1: enumeration varies) ---
 detect_ssd(){
@@ -148,5 +149,5 @@ for pass in $(seq 1 "$MAX_PASSES"); do
     revive_cameras
   fi
 done
-
-log "SUMMARY: $(count) MP4 file(s), $(du -sh "$DEST" 2>/dev/null | cut -f1) on $DEST"
+# No separate SUMMARY line: gopro_download.py already prints the single "done ·
+# N new ... · X/total on SSD" line, which is the summary.

@@ -345,8 +345,8 @@ class Progress:
         eta = (total - done) / (done / el) if (done > 0 and el > 0 and total > done) else 0
         filled = int(pct / 5)
         bar = "#" * filled + "-" * (20 - filled)
-        return (f">>> [{bar}] {pct:4.1f}%  {done/1e9:.2f}/{total/1e9:.2f} GB  "
-                f"{spd:5.1f} MB/s  ETA {_fmt_eta(eta):>7}  files {fd}/{ft}")
+        return (f"[{bar}] {pct:3.0f}%  {done/1e9:.1f}/{total/1e9:.1f} GB  "
+                f"{spd:.0f} MB/s  ETA {_fmt_eta(eta)}  {fd}/{ft}")
 
 
 def _reporter(progress):
@@ -584,7 +584,7 @@ def pick(jobs):
     except EOFError:
         sel = "all"
     if sel.strip().lower() in ("q", "quit", "cancel"):
-        print(">>> cancelled (nothing copied).")
+        print("cancelled (nothing copied).")
         return []
     keep = _parse_selection(sel, len(flat))
     chosen = {}
@@ -618,12 +618,33 @@ def verify(jobs, dest):
             else:
                 missing_lines.append(f"  [{label}] {_ts(f['cre'])}_{f['name']}  ({f['size'] // 1_000_000} MB)")
     if not missing_lines:
-        print(f">>> OK: all {grand_total} clip(s) have a complete copy on the SSD.")
+        print(f"OK · all {grand_total} clip(s) complete on the SSD")
     else:
-        print(f">>> WARN: {len(missing_lines)}/{grand_total} clip(s) missing/incomplete -- re-run ./download.sh:")
+        print(f"WARN · {len(missing_lines)}/{grand_total} clip(s) missing/incomplete -- re-run ./download.sh:")
         for ln in missing_lines:
             print(ln)
     return len(missing_lines)
+
+
+def _already_on_ssd(jobs, dest):
+    """How many of the queued clips already have a same-size copy in `dest` -- so
+    the offload can announce "{to_copy}/{total} to copy" up front instead of only
+    revealing skips at the end."""
+    present = 0
+    for label, ip, files in jobs:
+        outdir = os.path.join(dest, label)
+        have = {}
+        if os.path.isdir(outdir):
+            for fn in os.listdir(outdir):
+                p = os.path.join(outdir, fn)
+                if fn.lower().endswith(".mp4") and os.path.isfile(p):
+                    sz = os.path.getsize(p)
+                    have[sz] = have.get(sz, 0) + 1
+        for f in files:
+            if have.get(f["size"], 0) > 0:
+                have[f["size"]] -= 1
+                present += 1
+    return present
 
 
 # --- CLI ---------------------------------------------------------------------
@@ -660,11 +681,9 @@ def main():
     else:
         parallel = auto_parallel(cams)
 
-    links = ", ".join(f"{l}({ip},{usb_speed(ifc) or '?'}M)" for l, ip, ifc in cams)
-    print(f">>> {len(cams)} camera(s): {links}")
     jobs = gather(cams, minsize, args.minsec)
     if not jobs:
-        print(">>> nothing to copy (after filtering).")
+        print("nothing to copy (after filtering).")
         return 0
     if args.verify:                       # compare against the SSD instead of copying
         guard_dest_mounted(args.dest)     # an unmounted dest would read empty -> false "all missing"
@@ -672,26 +691,27 @@ def main():
     if args.pick:
         jobs = pick(jobs)
         if not jobs:
-            print(">>> nothing selected.")
+            print("nothing selected.")
             return 0
 
     total = sum(len(f) for _, _, f in jobs)
-    mode = "parallel" if parallel else "sequential"
-    if not (args.parallel or args.sequential):
-        mode += " (auto)"
-    if args.maxrate > 0:
-        mode += f", capped {args.maxrate:g} MB/s"
     guard_dest_mounted(args.dest)   # never silently fill the Pi root if the SSD isn't mounted
-    print(f">>> {total} clip(s) on {len(jobs)} camera(s) [{mode}] -> {args.dest}")
+    present0 = _already_on_ssd(jobs, args.dest)   # count what's ALREADY there, up front
+    to_copy = total - present0
+    cap = f" · cap {args.maxrate:g}MB/s" if args.maxrate > 0 else ""
+    if to_copy == 0:                    # nothing new -> one line, done
+        print(f"{len(jobs)} cam · all {total} already on SSD{cap}")
+        return 0
+    print(f"{len(jobs)} cam · {to_copy}/{total} to copy{cap}")
     t0 = time.time()
     counters = download_all(jobs, args.dest, parallel=parallel)
     dt = time.time() - t0
     rate = (counters["bytes"] / dt / 1e6) if dt else 0
-    # Report NEW copies apart from already-present clips, so "12 clips" then
-    # "0 new" is never read as "nothing worked" -- it means it was already offloaded.
-    tail = f", {counters['fail']} failed" if counters["fail"] else ""
-    print(f">>> done: {counters['n']} new ({counters['bytes'] // 1_000_000} MB, "
-          f"{rate:.1f} MB/s), {counters['skip']} already on SSD{tail} -> {args.dest}")
+    on_ssd = present0 + counters["n"]                     # clips of this set now complete on the SSD
+    tail = f" · {counters['fail']} FAILED (re-run)" if counters["fail"] else ""
+    # Single summary line (no separate SUMMARY): new copies + total of this set on the SSD.
+    print(f"done · {counters['n']} new, {counters['bytes'] // 1_000_000} MB @ "
+          f"{rate:.0f} MB/s · {on_ssd}/{total} on SSD{tail}")
     return 1 if counters["fail"] else 0
 
 

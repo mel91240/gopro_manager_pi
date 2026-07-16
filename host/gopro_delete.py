@@ -38,7 +38,8 @@ def _log(msg):
     manager_log.sh sees every deletion -- the same way the manager logs its own
     actions. Best-effort: never let logging break a delete."""
     try:
-        subprocess.run(["logger", "-t", "delete", "--", msg], check=False, timeout=5)
+        subprocess.run(["logger", "-p", "user.info", "-t", "delete", "--", msg],
+                       check=False, timeout=5)
     except Exception:
         pass
 
