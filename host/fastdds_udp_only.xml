@@ -6,7 +6,7 @@
      yet no data is ever delivered (and a hard `docker rm -f` leaks SHM segments
      onto the host when --ipc host is used). UDP localhost (ROS_LOCALHOST_ONLY=1
      restricts it to loopback) is robust for these tiny status messages and never
-     leaks. Pointed to by FASTRTPS_DEFAULT_PROFILES_FILE in manager_up.sh/menu.sh. -->
+     leaks. Pointed to by FASTRTPS_DEFAULT_PROFILES_FILE in manager_up.sh and gopro_ctl.sh. -->
 <dds xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
   <profiles>
     <transport_descriptors>

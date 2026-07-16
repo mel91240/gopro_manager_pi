@@ -96,7 +96,6 @@ else
 fi
 
 say "done. The cameras now arm on every boot."
-echo "    operator menu : $SCRIPTS_DST/gopro.sh"
 echo "    control (cli) : $SCRIPTS_DST/gopro_ctl.sh  record | stop | status | settings k=v"
 echo "    manager logs  : $SCRIPTS_DST/manager_log.sh"
 echo "    remove        : $REPO/uninstall.sh"

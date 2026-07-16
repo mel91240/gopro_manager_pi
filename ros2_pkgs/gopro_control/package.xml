@@ -3,7 +3,7 @@
 <package format="3">
   <name>gopro_control</name>
   <version>0.1.0</version>
-  <description>Wired GoPro control for the AUV: recording, settings and uhubctl power recovery.</description>
+  <description>Wired GoPro control for the AUV: recording, settings, and a camera-drop watchdog (Vbus power-cycle is delegated to the host revive watcher, not this node).</description>
   <maintainer email="claude@nowyouknow.fr">melanie</maintainer>
   <license>Apache-2.0</license>
 

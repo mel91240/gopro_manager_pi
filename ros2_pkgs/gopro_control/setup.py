@@ -20,13 +20,12 @@ setup(
     zip_safe=True,
     maintainer='melanie',
     maintainer_email='claude@nowyouknow.fr',
-    description='Wired GoPro control for the AUV: recording, settings and uhubctl power recovery.',
+    description='Wired GoPro control for the AUV: recording, settings, and a camera-drop watchdog (Vbus power-cycle is delegated to the host revive watcher, not this node).',
     license='Apache-2.0',
     extras_require={'test': ['pytest']},
     entry_points={
         'console_scripts': [
             'gopro_manager = gopro_control.nodes.gopro_manager_node:main',
-            'pi_menu = gopro_control.nodes.pi_menu_node:main',
         ],
     },
 )
