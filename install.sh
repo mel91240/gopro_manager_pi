@@ -97,5 +97,6 @@ fi
 
 say "done. The cameras now arm on every boot."
 echo "    control (cli) : $SCRIPTS_DST/gopro_ctl.sh  record | stop | status | settings k=v"
+echo "    SSD offload   : $SCRIPTS_DST/download.sh  (run '$REPO/setup.sh' once first to disable UAS on the SSD, then reboot)"
 echo "    manager logs  : $SCRIPTS_DST/manager_log.sh"
 echo "    remove        : $REPO/uninstall.sh"
