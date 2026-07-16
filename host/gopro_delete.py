@@ -23,6 +23,7 @@ Reuses discovery / media listing from gopro_download.py.
 """
 import argparse
 import json
+import subprocess
 import sys
 import time
 from urllib.request import urlopen
@@ -30,6 +31,16 @@ from urllib.request import urlopen
 import gopro_download as gd
 
 PORT = 8080
+
+
+def _log(msg):
+    """Mirror a one-line action to journald (tag 'delete') so an operator watching
+    manager_log.sh sees every deletion -- the same way the manager logs its own
+    actions. Best-effort: never let logging break a delete."""
+    try:
+        subprocess.run(["logger", "-t", "delete", "--", msg], check=False, timeout=5)
+    except Exception:
+        pass
 
 
 # --- camera helpers ----------------------------------------------------------
@@ -113,6 +124,7 @@ def run_deletion(targets, yes, what, full_wipe=False):
             ans = ""
         if ans.strip().lower() != want:
             print(">>> aborted (nothing deleted).")
+            _log(f"delete aborted (wrong confirmation): {cams} ({what})")
             return 0, 0
 
     ok = fail = 0
@@ -135,12 +147,14 @@ def run_deletion(targets, yes, what, full_wipe=False):
         sys.stdout.write("\n")
         sys.stdout.flush()
     print(f">>> deleted {ok} clip(s), {fail} failure(s).")
+    _log(f"delete {what}: {ok} removed, {fail} failed ({cams})")
     return ok, fail
 
 
 # --- CLI ---------------------------------------------------------------------
 def main():
-    ap = argparse.ArgumentParser(description="Delete GoPro media (DESTRUCTIVE).")
+    ap = argparse.ArgumentParser(description="Delete GoPro media (DESTRUCTIVE).",
+                                 allow_abbrev=False)   # so a typo like --al does NOT match --all
     ap.add_argument("--pick", action="store_true", help="choose which clips to delete")
     ap.add_argument("--all", action="store_true", help="delete ALL media on the card(s)")
     ap.add_argument("--cam", help="restrict to one camera label (LEFT/RIGHT/CAM2..)")
@@ -160,6 +174,7 @@ def main():
     # never delete on a camera that is recording
     live = [c for c in cams if is_recording(c[1])]
     if live:
+        _log("delete refused (recording): " + ", ".join(l for l, _, _ in live))
         print("!!! REFUSING: these cameras are RECORDING -- stop the take first: "
               + ", ".join(f"{l}({ip})" for l, ip, _ in live))
         return 1

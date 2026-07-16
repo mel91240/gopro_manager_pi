@@ -7,5 +7,5 @@
 # Filter by SyslogIdentifier (-t), NOT by unit (-u): the auto-revive watcher
 # shells out to `sudo uhubctl` every scan, and -u would drown our lines in
 # sudo/PAM session noise. -t keeps ONLY our own output (gopro=manager,
-# revive=watcher, download=download.sh).
-exec journalctl -t gopro -t revive -t download -f -n 60 -o short --no-hostname "$@"
+# revive=watcher, download=download.sh, delete=gopro_delete.py).
+exec journalctl -t gopro -t revive -t download -t delete -f -n 60 -o short --no-hostname "$@"
