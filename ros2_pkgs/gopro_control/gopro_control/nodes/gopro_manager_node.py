@@ -109,6 +109,8 @@ class GoProManagerNode(Node):
             'solo_file', '/home/cosma_auv/swarm-vehicle/gopro_scripts/.solo')
         self.declare_parameter(                                      # manager publishes socket->label here so the host watcher can log [LEFT]/[RIGHT], not "socket 2-2:2"
             'socket_labels_file', '/home/cosma_auv/swarm-vehicle/gopro_scripts/.socket_labels')
+        self.declare_parameter(                                      # human-readable status snapshot written each tick; gopro_ctl.sh status reads it (reliable, no DDS)
+            'status_file', '/home/cosma_auv/swarm-vehicle/gopro_scripts/.status')
 
         self.labels = [str(x) for x in self.get_parameter('camera_labels').value]
         self.expected = len(self.labels)
@@ -127,6 +129,7 @@ class GoProManagerNode(Node):
         self.solo_request_file = str(self.get_parameter('solo_request_file').value)
         self.solo_file = str(self.get_parameter('solo_file').value)
         self.socket_labels_file = str(self.get_parameter('socket_labels_file').value)
+        self.status_file = str(self.get_parameter('status_file').value)
 
         # The Vbus-request and recording-intent files MUST land in a directory the
         # host watcher (revive.sh) also sees (a bind mount). If that directory is
@@ -472,7 +475,7 @@ class GoProManagerNode(Node):
             self._faulted[cam.label] = 'SD missing/full/unformatted'
             self._ready.discard(cam.label)
             self.get_logger().error(
-                f'[{cam.label}] SD unusable (full/missing/unformatted) -> cannot record. Empty the cards ([3]).')
+                f'[{cam.label}] SD unusable (full/missing/unformatted) -> cannot record. Empty the cards (gopro_delete.py).')
             return False
         # Honest readiness test: a real (brief) shutter start/stop. This actually
         # proves the camera can record -- a weaker SD-only check would call a
@@ -502,9 +505,9 @@ class GoProManagerNode(Node):
             if self._faulted:
                 details = '; '.join(f'{lbl} ({why})' for lbl, why in sorted(self._faulted.items()))
                 return self._reply(response, False,
-                    f'Cannot record -- {details}. Empty the cards ([3]) or swap the SD, then retry.')
+                    f'Cannot record -- {details}. Empty the cards (gopro_delete.py) or swap the SD, then retry.')
             if self.recording:
-                return self._reply(response, False, 'Already recording. Stop first ([2]) before starting again.')
+                return self._reply(response, False, 'Already recording. Stop first before starting again.')
             if not self.cameras:
                 return self._reply(response, False, 'No camera connected.')
 
@@ -572,7 +575,7 @@ class GoProManagerNode(Node):
         if self.recording:
             for lbl in self.labels:
                 self.get_logger().warn(f'[{lbl}] settings not applied (recording)')
-            return self._reply(response, False, 'Cannot change settings while recording. Stop first ([2]).')
+            return self._reply(response, False, 'Cannot change settings while recording. Stop first.')
 
         err = gp_settings.validate(
             camera_mode=request.camera_mode, resolution=request.resolution, fps=request.fps,
@@ -859,7 +862,7 @@ class GoProManagerNode(Node):
         if not cam.sd_present():
             # A full/unusable SD is TERMINAL, not a transient drop: the vehicle has
             # to surface. Stop ALL cameras cleanly (so the others finalise their
-            # files, exactly like an operator [2]) and drop the recording intent so
+            # files, exactly like a manual stop) and drop the recording intent so
             # nothing auto-resumes when the card is later cleared. The FAULT state
             # stays raised (via _faulted) so autonomy still sees MISSION COMPROMISED;
             # once the card is emptied the re-arm clears the fault -> READY, and the
@@ -960,7 +963,7 @@ class GoProManagerNode(Node):
             self.state = GoProSystem.STATE_FAULT
             _h = _bus_hint(lost_s)
             self.message = ('MISSION COMPROMISED -- no camera filming'
-                            + (f'; {_h}' if _h else '') + ' (vehicle should hold)')
+                            + (f'; {_h}' if _h else ''))
         elif self._unreliable:
             # A camera flapped too many times this take: latched EMERGENCY even if
             # it is filming again right now (its footage can't be trusted). Clears
@@ -1039,6 +1042,28 @@ class GoProManagerNode(Node):
             # all_ready = the FULL expected set is armed, not just "all present cameras".
             all_ready=(want > 0 and len(self._ready) >= want),
             num_cameras=n, num_recording=recording_now, sd_info=sd_info))
+        self._write_status_file(n, recording_now, want, sd_info)
+
+    def _write_status_file(self, n, recording_now, want, sd_info):
+        """Write a human-readable status snapshot (atomic) that `gopro_ctl.sh status`
+        just reads -- reliable even when a fresh `ros2 topic echo` can't discover the
+        latched topic in time, and greppable for automation scripts."""
+        names = {GoProSystem.STATE_INITIALIZING: 'INITIALIZING',
+                 GoProSystem.STATE_READY: 'READY', GoProSystem.STATE_RECORDING: 'RECORDING',
+                 GoProSystem.STATE_DEGRADED: 'DEGRADED', GoProSystem.STATE_FAULT: 'FAULT'}
+        text = (f"state: {names.get(self.state, self.state)}\n"
+                f"message: {self.message}\n"
+                f"recording: {recording_now}/{want}\n"
+                f"cameras_present: {n}\n"
+                f"sd: {sd_info or '-'}\n"
+                f"time: {time.strftime('%Y-%m-%d %H:%M:%S %Z')}\n")
+        try:
+            tmp = self.status_file + '.tmp'
+            with open(tmp, 'w') as f:
+                f.write(text)
+            os.replace(tmp, self.status_file)
+        except OSError as e:
+            self.get_logger().debug(f'status file write failed: {e}')
 
 
 def main(args=None):
