@@ -117,6 +117,17 @@ check_uas
 ensure_mount
 cd "$HERE"; export PYTHONPATH="$HERE"
 
+# --verify / --pick are single-shot modes (a check, or an interactive choice) --
+# NOT unattended copying. Run the downloader ONCE and pass its result straight
+# through: no retry loop, no per-pass announcements, no SUMMARY. Otherwise
+# `--verify` gets re-run (and, on any missing clip, looped) which is exactly the
+# noise we want to avoid.
+case " ${EXTRA[*]} " in
+  *" --verify "*|*" --pick "*)
+    python3 -u "$HERE/gopro_download.py" --minsec "$MINSEC" --dest "$DEST" "${EXTRA[@]}" 2>&1 | logpipe
+    exit "${PIPESTATUS[0]}" ;;
+esac
+
 for pass in $(seq 1 "$MAX_PASSES"); do
   [ "$pass" -gt 1 ] && log "retry $((pass-1)): a camera had dropped -- resuming (already-copied clips are skipped)"
   # --minsec BEFORE EXTRA so a user-supplied --minsec on the CLI wins (argparse: last one applies)
