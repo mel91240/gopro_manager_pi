@@ -10,7 +10,8 @@
 #   ./gopro_ctl.sh stop                   stop recording
 #   ./gopro_ctl.sh status                 show state (READY/RECORDING + per-cam SD)
 #   ./gopro_ctl.sh solo LEFT|RIGHT        keep only that camera, power the other off
-#   ./gopro_ctl.sh duo                    re-enable both cameras
+#   ./gopro_ctl.sh duo   (or on)          re-enable both cameras
+#   ./gopro_ctl.sh off                    power BOTH cameras off (idle, anti-overheat) until 'on'
 #   ./gopro_ctl.sh settings k=v ...        change only the fields you pass:
 #        resolution fps fov hypersmooth wind_reduction camera_mode
 #        e.g. ./gopro_ctl.sh settings resolution=4K fps=30 fov=Linear
@@ -108,9 +109,12 @@ case "$cmd" in
         esac
         echo "solo $tgt sent -- manager verdict:"
         solo_request "$tgt" ;;
-    duo)
-        echo "duo sent -- manager verdict:"
+    duo|on)
+        echo "$cmd sent -- manager verdict:"
         solo_request duo ;;
+    off)
+        echo "off sent (powering BOTH cameras off) -- manager verdict:"
+        solo_request off ;;
     settings)
         [ $# -gt 0 ] || { echo "usage: $0 settings key=value ...  (only the fields you want to change)"; settings_help; exit 2; }
         yaml=""
@@ -130,5 +134,5 @@ case "$cmd" in
             settings_help; exit 1
         fi ;;
     help|-h|--help) usage ;;
-    *) echo "unknown command '$cmd'. Try: record (or start) | stop | status | solo | duo | settings | help"; exit 2 ;;
+    *) echo "unknown command '$cmd'. Try: record (or start) | stop | status | solo | duo | on | off | settings | help"; exit 2 ;;
 esac

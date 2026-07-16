@@ -519,6 +519,17 @@ class GoProManagerNode(Node):
             time.sleep(1.0)                     # let them leave MTP before the synchronized start
             sync_datetime(self.cameras)         # same UTC second on all cams (barrier)
             results = set_recording(self.cameras, True)
+            # A camera that slipped back into MTP after sitting idle can still 500 on
+            # the first shutter even after enable_wired_control -- so retry the misses
+            # ONCE with a full re-arm (init() leaves MTP for good). This makes the
+            # FIRST `record` succeed instead of leaning on the ~45s watchdog, which
+            # looked like "no retry" to the operator (notably right after a clock jump).
+            missed = [c for c in self.cameras if not results.get(c.label)]
+            if missed:
+                for cam in missed:
+                    cam.init()
+                time.sleep(1.0)
+                results.update(set_recording(missed, True))
             started = [lbl for lbl, ok in results.items() if ok]
 
             self.recording = len(started) > 0
@@ -542,7 +553,8 @@ class GoProManagerNode(Node):
                 self.get_logger().warn(f'[{lbl}] failed to start (watchdog will retry)')
             success = len(started) > 0
             msg = (f'Recording started on {started}.' if success
-                   else 'Failed to start recording on any camera.')
+                   else 'No camera confirmed recording -- they may have dropped to '
+                        'MTP after idle. Run `record` again.')
         else:
             if not self.recording:
                 self.get_logger().warn('Stop requested but state says not recording -- sending stop anyway.')
@@ -713,12 +725,15 @@ class GoProManagerNode(Node):
         The ONE thing we refuse is disabling a camera that is actually recording --
         stop it first, so a take is never severed."""
         t = token.strip().upper()
-        if t in ('DUO', 'OFF'):
+        if t in ('DUO', 'ON'):
             for lbl in sorted(self._disabled):
                 self.get_logger().info(f'[{lbl}] enabled')
             self._disabled.clear()
             self._disabled_sockets.clear()
             self._write_solo_file()          # empty -> watcher powers all back on
+            return
+        if t == 'OFF':
+            self._apply_off()
             return
         if t not in self.labels:
             self.get_logger().warn(
@@ -750,6 +765,29 @@ class GoProManagerNode(Node):
         for lbl in sorted(disabled):
             self.get_logger().info(f'[{lbl}] disabled')
         self.get_logger().info(f'[{keep}] solo')
+
+    def _apply_off(self):
+        """Deliberately power ALL cameras off and keep them off until `on`/`duo`
+        (e.g. to avoid overheating when the rig sits idle). A deliberately-off
+        camera is NOT 'missing': it is not expected, not auto-revived, and cannot
+        raise EMERGENCY. Refused while a take is in progress -- never sever it."""
+        if self.recording:
+            self.get_logger().warn('off refused (recording -- stop first)')
+            return
+        disabled = set(self.labels)
+        self._disabled = disabled
+        self._reviving_logged -= disabled
+        self._recovering = {l: t for l, t in self._recovering.items() if l not in disabled}
+        for l in disabled:
+            self._recover_attempts.pop(l, None)
+        self.cameras = [c for c in self.cameras if c.label not in disabled]
+        self._ready -= disabled
+        # keep any known socket so the watcher can cut + name it; _sync fills the rest
+        self._disabled_sockets = {l: hp for l, hp in self._disabled_sockets.items() if l in disabled}
+        self._sync_solo_file()
+        for lbl in sorted(disabled):
+            self.get_logger().info(f'[{lbl}] disabled')
+        self.get_logger().info('all cameras off (idle)')
 
     # =====================================================================
     # Periodic tick: snapshot -> watchdog -> publish
@@ -1002,6 +1040,11 @@ class GoProManagerNode(Node):
             # present cameras", so a duo rig missing a camera is never called ready.
             self.state = GoProSystem.STATE_READY
             self.message = f'ready {len(self._ready)}/{want}'
+        elif want == 0:
+            # every camera deliberately powered off (`off`/idle) -- a stable, benign
+            # state: NOT a fault, and not "initializing" (nothing is coming up).
+            self.state = GoProSystem.STATE_READY
+            self.message = 'all cameras off (idle)'
         else:
             self.state = GoProSystem.STATE_INITIALIZING
             self.message = f'{len(self._ready)}/{want} cameras ready'
