@@ -245,7 +245,7 @@ def _pull_range(ip, f, end, part, target, progress=None):
                     os.fsync(o.fileno())           # -> Pi stays responsive (sshd survives)
                     since_sync = 0
                 if progress is not None:
-                    progress.add(len(b))
+                    progress.transfer(len(b))          # real transfer -> counts toward the displayed speed
                 if _LIMITER is not None:
                     _LIMITER.throttle(len(b))       # pace total throughput (WiFi-safe rate)
     finally:
@@ -322,14 +322,20 @@ class Progress:
         self.total = total_bytes
         self.total_files = total_files
         self.done = 0
+        self.moved = 0          # bytes actually TRANSFERRED (excludes already-present files counted instantly)
         self.files_done = 0
         self.lock = threading.Lock()
         self.t0 = time.monotonic()
         self.stop = False
 
-    def add(self, n):
+    def add(self, n):           # complete WITHOUT transfer (an already-present file) -> advances the bar only
         with self.lock:
             self.done += n
+
+    def transfer(self, n):      # real bytes pulled from a camera -> advances the bar AND drives the speed/ETA
+        with self.lock:
+            self.done += n
+            self.moved += n
 
     def file_done(self):
         with self.lock:
@@ -337,12 +343,13 @@ class Progress:
 
     def render(self):
         with self.lock:
-            done, total = self.done, self.total
+            done, total, moved = self.done, self.total, self.moved
             fd, ft = self.files_done, self.total_files
         el = time.monotonic() - self.t0
-        spd = done / el / 1e6 if el > 0 else 0.0
+        rate = moved / el if el > 0 else 0.0          # speed from TRANSFERRED bytes, so a resume isn't inflated
+        spd = rate / 1e6
         pct = done / total * 100 if total else 100.0
-        eta = (total - done) / (done / el) if (done > 0 and el > 0 and total > done) else 0
+        eta = (total - done) / rate if (rate > 0 and total > done) else 0
         filled = int(pct / 5)
         bar = "#" * filled + "-" * (20 - filled)
         return (f"[{bar}] {pct:3.0f}%  {done/1e9:.1f}/{total/1e9:.1f} GB  "
@@ -359,7 +366,7 @@ def _reporter(progress):
     explicitly so a stall reads as a stall, not as a hang of the tool itself."""
     last_done = -1
     last_move = time.monotonic()
-    last_log = last_move                   # non-TTY: first milestone ~30s in, not at t=0
+    last_log = last_move                   # non-TTY: first milestone ~10s in, not at t=0
     while not progress.stop:
         with progress.lock:
             cur = progress.done
@@ -376,8 +383,8 @@ def _reporter(progress):
                 sys.stdout.flush()
             time.sleep(0.3)
         else:
-            if now - last_log >= 30:       # journald: one clean milestone every ~30s
-                _emit(line)
+            if now - last_log >= 10:       # journald: a progress/speed milestone every ~10s
+                _emit(line)                # (carries the [stalled Ns] flag too -> spot a block fast)
                 last_log = now
             time.sleep(1.0)
 
