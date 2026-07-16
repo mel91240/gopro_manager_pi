@@ -39,15 +39,16 @@ svc_call() {   # $1=service  $2=type  $3=payload(YAML)
         exec ros2 service call "$S" "$T" "$P"'
 }
 
-topic_once() {  # $1=topic
-    docker exec -e TOPIC="$1" "$CONTAINER" bash -lc '
-        source /opt/ros/humble/setup.bash
-        source /home/cosma_auv/swarm-vehicle/ros2_ws/install/setup.bash
-        export ROS_DOMAIN_ID=0 ROS_LOCALHOST_ONLY=1
-        export FASTRTPS_DEFAULT_PROFILES_FILE=/home/cosma_auv/swarm-vehicle/gopro_scripts/fastdds_udp_only.xml
-        # ~/system is latched (transient-local) -- request the same durability so we
-        # get the last published state at once, even on a stable idle rig.
-        exec timeout 8 ros2 topic echo --once --qos-durability transient_local "$TOPIC"'
+read_status() {   # print the manager's latest snapshot from the .status file it writes each tick
+    local f; f="$(cd "$(dirname "$0")" && pwd)/.status"
+    if [ ! -f "$f" ]; then
+        echo "no status yet -- is the manager running?  (sudo systemctl status gopro-manager)"
+        return 1
+    fi
+    cat "$f"
+    local age=$(( $(date +%s) - $(stat -c %Y "$f") ))
+    [ "$age" -gt 5 ] && echo "!!! WARNING: this status is ${age}s old -- the manager may be stopped."
+    return 0
 }
 
 usage() {
@@ -74,27 +75,42 @@ EOF
 # Solo/duo are handled host-side: the CLI just drops the request in a file the
 # manager consumes (it alone knows label->socket and drives the watcher). No
 # docker exec needed -- gopro_ctl.sh lives in the shared handoff dir.
+#
+# The request is async, but we still give the SENDING terminal a verdict: capture
+# a journald cursor, drop the file, then poll the manager's own log (tag gopro)
+# for its outcome line ([X] disabled / [X] solo / solo refused (recording) /
+# [X] enabled). So the operator sees applied-or-refused here, not just "sent".
 solo_request() {   # $1 = LEFT|RIGHT|duo
     local dir; dir="$(cd "$(dirname "$0")" && pwd)"
+    local since; since="$(date '+%Y-%m-%d %H:%M:%S')"
     printf '%s\n' "$1" > "$dir/.solo_request"
+    local i line
+    for i in $(seq 1 8); do          # ~4 s: the manager consumes it within one 1 s tick
+        sleep 0.5
+        line="$(journalctl -t gopro --since "$since" --no-pager -o cat 2>/dev/null \
+                | grep -iE 'solo|disabled|enabled|refused' | tail -4)"
+        [ -n "$line" ] && { printf '%s\n' "$line"; return 0; }
+    done
+    echo "(no verdict in the log yet -- the manager may have had nothing to change; watch ./manager_log.sh)"
+    return 1
 }
 
 cmd="${1:-help}"; shift || true
 case "$cmd" in
     record|start) svc_call "$NODE/record" std_srvs/srv/SetBool "{data: true}"  ;;
     stop)         svc_call "$NODE/record" std_srvs/srv/SetBool "{data: false}" ;;
-    status)       topic_once "$NODE/system" ;;
+    status)       read_status ;;
     solo)
         tgt="$(printf '%s' "${1:-}" | tr '[:lower:]' '[:upper:]')"
         case "$tgt" in
             LEFT|RIGHT) ;;
             *) echo "usage: $0 solo LEFT|RIGHT   (keep only that camera, power the other off). Back to both: $0 duo"; exit 2 ;;
         esac
-        solo_request "$tgt"
-        echo "solo $tgt requested -- watch ./manager_log.sh: the manager confirms and powers the other camera off." ;;
+        echo "solo $tgt sent -- manager verdict:"
+        solo_request "$tgt" ;;
     duo)
-        solo_request duo
-        echo "duo requested -- both cameras re-enabled; watch ./manager_log.sh." ;;
+        echo "duo sent -- manager verdict:"
+        solo_request duo ;;
     settings)
         [ $# -gt 0 ] || { echo "usage: $0 settings key=value ...  (only the fields you want to change)"; settings_help; exit 2; }
         yaml=""
