@@ -394,6 +394,8 @@ def _download_one(ip, label, f, dest, lock, counters, progress=None):
     size = f["size"]
     out, done = _resolve_out(outdir, name, size)   # collision-safe (never overwrite a different clip)
     if done:
+        with lock:
+            counters["skip"] += 1                  # already on the SSD -> counted apart from NEW copies
         if progress is not None:
             progress.add(size)
             progress.file_done()
@@ -469,7 +471,7 @@ def download_all(jobs, dest, lock=None, counters=None, parallel=False):
     parallel: download cameras at once (use only when all cameras are USB3 --
     see auto_parallel())."""
     lock = lock or threading.Lock()
-    counters = counters if counters is not None else {"n": 0, "bytes": 0, "fail": 0}
+    counters = counters if counters is not None else {"n": 0, "bytes": 0, "fail": 0, "skip": 0}
 
     total_bytes = sum(f["size"] for _, _, files in jobs for f in files)
     total_files = sum(len(files) for _, _, files in jobs)
@@ -597,8 +599,9 @@ def verify(jobs, dest):
     missing or incomplete. Matches by SIZE within the camera's folder (robust to
     the timestamped / collision-spilled file names). Returns the number of
     missing/incomplete clips -- 0 means everything is fully copied."""
-    print(f">>> verifying {dest} against the cameras ...")
-    grand_missing = 0
+    # Minimal by design: stay silent about what is fine, name only what is wrong.
+    grand_total = 0
+    missing_lines = []
     for label, ip, files in jobs:
         outdir = os.path.join(dest, label)
         have = {}                                  # size -> how many copies on disk
@@ -608,23 +611,19 @@ def verify(jobs, dest):
                 if fn.lower().endswith(".mp4") and os.path.isfile(p):
                     sz = os.path.getsize(p)
                     have[sz] = have.get(sz, 0) + 1
-        missing = []
         for f in files:
+            grand_total += 1
             if have.get(f["size"], 0) > 0:
                 have[f["size"]] -= 1               # consume one matching copy
             else:
-                missing.append(f)
-        cam_mb = sum(f["size"] for f in files) // 1_000_000
-        print(f"  [{label}] cameras: {len(files)} clip(s) / {cam_mb} MB  ->  "
-              f"{len(files) - len(missing)} fully on SSD, {len(missing)} missing/incomplete")
-        for f in missing:
-            print(f"     x {_ts(f['cre'])}_{f['name']}  ({f['size'] // 1_000_000} MB)")
-        grand_missing += len(missing)
-    if grand_missing == 0:
-        print(">>> OK: all camera clips have a same-size copy on the SSD -- copy is complete.")
+                missing_lines.append(f"  [{label}] {_ts(f['cre'])}_{f['name']}  ({f['size'] // 1_000_000} MB)")
+    if not missing_lines:
+        print(f">>> OK: all {grand_total} clip(s) have a complete copy on the SSD.")
     else:
-        print(f">>> WARN: {grand_missing} clip(s) missing/incomplete -- re-run the copy to finish.")
-    return grand_missing
+        print(f">>> WARN: {len(missing_lines)}/{grand_total} clip(s) missing/incomplete -- re-run ./download.sh:")
+        for ln in missing_lines:
+            print(ln)
+    return len(missing_lines)
 
 
 # --- CLI ---------------------------------------------------------------------
@@ -683,13 +682,16 @@ def main():
     if args.maxrate > 0:
         mode += f", capped {args.maxrate:g} MB/s"
     guard_dest_mounted(args.dest)   # never silently fill the Pi root if the SSD isn't mounted
-    print(f">>> downloading {total} clip(s) from {len(jobs)} camera(s) [{mode}] -> {args.dest}")
+    print(f">>> {total} clip(s) on {len(jobs)} camera(s) [{mode}] -> {args.dest}")
     t0 = time.time()
     counters = download_all(jobs, args.dest, parallel=parallel)
     dt = time.time() - t0
     rate = (counters["bytes"] / dt / 1e6) if dt else 0
-    print(f">>> done: {counters['n']} file(s), {counters['bytes'] // 1_000_000} MB in {_fmt_eta(dt)} "
-          f"({rate:.1f} MB/s) -> {args.dest}   (failures: {counters['fail']})")
+    # Report NEW copies apart from already-present clips, so "12 clips" then
+    # "0 new" is never read as "nothing worked" -- it means it was already offloaded.
+    tail = f", {counters['fail']} failed" if counters["fail"] else ""
+    print(f">>> done: {counters['n']} new ({counters['bytes'] // 1_000_000} MB, "
+          f"{rate:.1f} MB/s), {counters['skip']} already on SSD{tail} -> {args.dest}")
     return 1 if counters["fail"] else 0
 
 

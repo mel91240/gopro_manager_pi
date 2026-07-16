@@ -109,30 +109,33 @@ revive_cameras(){
 count(){ find "$DEST" -type f -name '*.MP4' 2>/dev/null | wc -l ; }
 
 # --- main -------------------------------------------------------------------
+# The retry loop exists only for camera drops. In the normal case the first pass
+# copies everything and exits 0 (gopro_download.py returns non-zero iff a clip
+# failed), so we stop right there -- no repeated "pass X/6" / re-listing noise.
+# We only announce a pass when it is actually a RETRY (a camera had dropped).
 check_uas
 ensure_mount
 cd "$HERE"; export PYTHONPATH="$HERE"
-log "target: $DEST | mode: SEQUENTIAL (parallel forbidden on this Pi 4) | minsec: $MINSEC"
 
-prev=-1
 for pass in $(seq 1 "$MAX_PASSES"); do
-  log "=== pass $pass / $MAX_PASSES ==="
+  [ "$pass" -gt 1 ] && log "retry $((pass-1)): a camera had dropped -- resuming (already-copied clips are skipped)"
   # --minsec BEFORE EXTRA so a user-supplied --minsec on the CLI wins (argparse: last one applies)
   python3 -u "$HERE/gopro_download.py" --sequential --minsec "$MINSEC" --dest "$DEST" "${EXTRA[@]}" 2>&1 | logpipe
-  now=$(count)
-  log "pass $pass: $now MP4 files on the SSD"
-
-  if [ "$now" -gt "$prev" ]; then
-    prev="$now"; continue                 # progress -> keep going
-  fi
-  if cameras_ok; then
-    log "no new file and both cameras respond -> DONE"
+  rc=${PIPESTATUS[0]}
+  if [ "$rc" -eq 0 ]; then                    # clean pass: nothing failed
+    [ "$pass" -gt 1 ] && log "recovered -- all clips copied."
     break
   fi
-  log "no progress AND a camera stopped responding -> revive then new pass"
-  revive_cameras
-  prev="$now"
+  if [ "$pass" -eq "$MAX_PASSES" ]; then
+    log "still incomplete after $MAX_PASSES passes -- re-run ./download.sh later (it resumes)."
+    break
+  fi
+  if cameras_ok; then
+    log "some clips failed but both cameras respond -> retry"
+  else
+    log "a camera is off the bus -> power-cycle then retry"
+    revive_cameras
+  fi
 done
 
-log "=== SUMMARY: $(count) MP4 files, $(du -sh "$DEST" 2>/dev/null | cut -f1) on $DEST ==="
-log "done -- full log grouped in ./manager_log.sh (identifier 'download')."
+log "SUMMARY: $(count) MP4 file(s), $(du -sh "$DEST" 2>/dev/null | cut -f1) on $DEST"

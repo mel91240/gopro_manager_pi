@@ -513,7 +513,7 @@ class GoProManagerNode(Node):
 
             # Cameras silently fall back to MTP mode after sitting idle or
             # re-enumerating, which makes shutter/start return HTTP 500. Re-assert
-            # wired control just before starting so [1] doesn't spuriously fail.
+            # wired control just before starting so `record` doesn't spuriously fail.
             for cam in self.cameras:
                 cam.enable_wired_control()
             time.sleep(1.0)                     # let them leave MTP before the synchronized start
@@ -866,7 +866,7 @@ class GoProManagerNode(Node):
             # nothing auto-resumes when the card is later cleared. The FAULT state
             # stays raised (via _faulted) so autonomy still sees MISSION COMPROMISED;
             # once the card is emptied the re-arm clears the fault -> READY, and the
-            # operator restarts manually with [1].
+            # operator restarts manually with `record`.
             self._faulted[cam.label] = 'SD full'
             self.get_logger().error(f'[{cam.label}] SD full -- recording stopped')
             set_recording(self.cameras, False)
