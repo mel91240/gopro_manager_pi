@@ -68,6 +68,11 @@ logic stays in charge:
 ```
 Running `settings` with a wrong/missing value prints the full list of valid options.
 
+> ⚠️ **Do not use 5K / 5.3K.** On this rig the cameras run on USB power with **no
+> battery**, and 5.3K capture draws more than the bus can reliably sustain -- it
+> browns the camera into a zombie (answers `/state`, refuses `/shutter`). Stay at
+> **4K or below** for dependable recording.
+
 **Offload / delete / logs:**
 ```bash
 ./download.sh                    # mount the SSD + resumable offload (live %/speed/ETA)
@@ -208,6 +213,7 @@ tests/             # automated ROS-interface test suite
 ## Hardware notes / lessons learned
 - **USB cable / uplink matters most.** The Hero 12 is a USB 2.0 device. A marginal or USB-3 uplink to the hub forces a flaky SuperSpeed link that drops under recording load -- the **#1 cause of "cameras drop mid-record"**. Use good USB 2.0 cables, firmly seated.
 - **Power budget.** Two Hero 12 recording 4K draw a lot (no battery, all on USB). A marginal hub supply browns out into a zombie state. Use a solid **5 V / 4-5 A+** supply.
+- **Never 5K / 5.3K.** Without a battery the USB rail cannot sustain 5.3K capture; the camera brown-outs into the zombie state (answers `/state`, refuses `/shutter`). Cap resolution at **4K**.
 - **A wedged hub survives a Pi reboot** (it is self-powered): if all cameras drop at once and `dmesg` shows repeated `usb ... error -110`, physically power-cycle the hub.
 - **Reboot interrupts recording** (USB bus reset), but the GoPro recovers the in-progress file on next boot and the manager auto-resumes a new segment.
 - **SD safety.** Cutting Vbus on a *visible/recording* camera can corrupt the card; on an *off-bus* (idle) camera it is safe -- and the only cure for a "zombie" camera (answers `/state` but `/shutter` 500).
