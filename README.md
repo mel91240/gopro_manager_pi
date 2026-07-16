@@ -1,184 +1,149 @@
 # gopro_manager_pi — autonomous wired GoPro control for the AUV
 
-**Purpose:** drive GoPro cameras from a Raspberry Pi — start/stop recording (and
-apply capture settings) on demand from the Pi, with no one touching the cameras.
-The Pi controls the GoPros over wired USB so a mission can be filmed, recovered
-and offloaded entirely under software control.
+Drive a pair of **GoPro Hero 12** cameras from a Raspberry Pi over wired USB:
+start/stop recording, change settings, offload and wipe footage -- all under
+software control, no one touching the cameras. Built for an AUV, so the recording
+subsystem is **autonomous and reboot-proof**. The cameras run **with no battery**
+(USB-powered) and are driven over the **Open GoPro wired HTTP API** (`.51:8080`).
 
-Two self-contained ROS 2 packages + host-side helpers that turn a pair of
-**GoPro Hero 12** cameras (driven over wired USB from a Raspberry Pi through a
-powered hub) into an **autonomous, reboot-proof** recording subsystem for the
-AUV. No existing package is modified; the cameras are driven over the **Open
-GoPro wired HTTP API** (camera at `.51:8080`).
-
-Validated live on the vehicle Pi (`auv006`) with 2× Hero 12 Black:
-- Hero 12 runs and records **with no battery**, powered over USB.
-- The whole flow survives the operator disconnecting, and survives a Pi reboot.
+Validated live on the vehicle Pi (`auv006`) with 2x Hero 12 Black.
 
 ---
 
-## Architecture
+## Install
 
-Three pieces, by design separate:
+A **self-contained add-on** to a Pi that already has the base AUV setup (the
+`cosma_auv` Docker image + the `swarm-vehicle` workspace). It adds two ROS 2
+packages and a `gopro_scripts/` folder, changes **no** existing package, and needs
+**no Docker image change**.
 
-| Piece | Where | Role | Lifetime |
-|---|---|---|---|
-| **`gopro_manager`** | Docker container (`cosma_auv`) | owns the cameras: arm, record, watchdog, auto-resume | persistent — systemd boot service (`gopro-manager.service`) + Docker `--restart`, survives SSH/reboot |
-| **`pi_menu`** | transient container | recording console (start/stop/settings), reached from `gopro.sh [1]` | open & close at will |
-| **auto-revive watcher** | host (systemd) | power-cycle a camera that fell **off the bus** (Vbus stays on the host) | persistent (starts on boot) |
-| **`gopro.sh`** + offload tools | host | unified operator menu: record / offload to SSD / wipe cards / manager | run on demand |
+**Prerequisites on the Pi:** the `cosma_auv` image, the `~/dev/swarm-vehicle`
+workspace, internet access, `uhubctl`, and the **correct date/time**.
 
-The manager has **no USB-power privileges** (it can't corrupt anything); the
-only component that touches Vbus is the host watcher, and only on a camera
-confirmed off the bus.
+> ⚠️ **Set the clock first.** A freshly flashed Pi with no RTC/NTP can boot with
+> its clock in the past, which makes `apt-get update` and TLS (`git clone`) fail
+> confusingly. Fix it before anything else:
+> ```bash
+> sudo timedatectl set-ntp true                 # if the Pi has internet, or:
+> sudo date -u -s "YYYY-MM-DD HH:MM:SS"          # set UTC manually
+> ```
 
-### Runtime map — what runs where, and the bridges between
+```bash
+sudo apt update && sudo apt install -y uhubctl
+git clone https://github.com/mel91240/gopro_manager_pi.git
+cd gopro_manager_pi
+./install.sh                    # build + host scripts + sudoers + boot services (idempotent)
+# non-default locations:  GOPRO_WS=/path/to/swarm-vehicle COSMA_IMAGE=myimg:tag ./install.sh
+# update later:           git pull && ./install.sh
+# remove:                 ./uninstall.sh        (footage is never touched)
+```
 
-The system spans two worlds: **Docker** (where ROS 2 lives) and the **host** (where
-`uhubctl` and the SSD live). Three bridges connect them.
+`install.sh` copies the ROS packages into the workspace and `colcon build`s them
+in the `cosma_auv` container, installs the host scripts into `gopro_scripts/`, the
+`uhubctl` sudoers rule, and the two systemd boot services. After it, **the manager
+and the auto-revive watcher start on every boot and the cameras arm themselves** --
+no manual step.
+
+> One extra prerequisite for the SSD offload: the SSD must run with UAS disabled
+> (`usb-storage.quirks=<VID:PID>:u` in `/boot/firmware/cmdline.txt`, then reboot),
+> or heavy writes wedge the Pi 4's shared USB controller. `download.sh` warns if
+> it is missing.
+
+---
+
+## Commands
+
+Everything runs from the scripts in `gopro_scripts/` -- there is no interactive menu.
+
+**Recording** -- these talk to the running manager, so its watchdog/EMERGENCY
+logic stays in charge:
+```bash
+./gopro_ctl.sh record            # start recording on all cameras   (alias: start)
+./gopro_ctl.sh stop              # stop
+./gopro_ctl.sh status            # READY/RECORDING + per-camera SD
+./gopro_ctl.sh settings resolution=4K fps=30 fov=Linear   # only the fields you pass
+./gopro_ctl.sh solo LEFT         # keep one camera, power the other off
+./gopro_ctl.sh duo               # re-enable both
+```
+Running `settings` with a wrong/missing value prints the full list of valid options.
+
+**Offload / delete / logs:**
+```bash
+./download.sh                    # mount the SSD + resumable offload (live %/speed/ETA)
+./download.sh --verify           # check every camera clip has a same-size copy on the SSD
+./gopro_delete.py --pick         # delete selected clips   (--all wipes the cards; type "all" to confirm)
+./manager_log.sh                 # live manager + auto-revive + download logs, in one stream
+```
+
+**Manager (normally automatic, boot service):**
+```bash
+./manager_up.sh   /   ./manager_down.sh      # manual start/stop (also the service Exec hooks)
+```
+
+**Typical mission:** power on (cameras auto-arm) → `./gopro_ctl.sh record`, put the
+AUV in the water, close SSH (the manager keeps running; if a reboot interrupts the
+take it auto-resumes a new segment) → after the dive, `./gopro_ctl.sh stop`,
+`./download.sh` to offload, then `./gopro_delete.py --all` once the footage is safe.
+
+---
+
+## How it works
+
+Three pieces, deliberately separate:
+
+| Piece | Where | Role |
+|---|---|---|
+| **`gopro_manager`** | Docker (`cosma_auv` image) | owns the cameras: arm, record, watchdog, auto-resume, EMERGENCY |
+| **auto-revive watcher** (`revive.sh`) | host (systemd) | power-cycle a camera that fell **off the bus** (Vbus lives on the host) |
+| **host scripts** (`gopro_ctl.sh` / `download.sh` / `gopro_delete.py`) | host | operator control, offload, wipe |
+
+The system spans two worlds -- **Docker** (where ROS 2 lives) and the **host**
+(where `uhubctl` and the SSD live):
 
 ```
 ┌─ Raspberry Pi — HOST (native, no ROS; has uhubctl + the SSD) ───────────────┐
 │                                                                             │
-│  gopro.sh ── operator menu (bash) ──┐                                       │
-│    [1] Recording ─► menu.sh ─────────┼──(bridge 1: launches a container)──┐ │
-│    [2] Copy   ─► gopro_download.py   │   HTTP :8080 ─► cameras ─► SSD      │ │
-│    [3] Delete ─► gopro_delete.py     │   HTTP :8080 ─► cameras            │ │
-│    [4] Manager ─► manager_up/down.sh │                                    │ │
-│    [5] Inspect─► gopro_download.py --verify  (SSD listing + copy check)   │ │
-│                                      ▼                                    ▼ │
-│  revive.sh (watcher, systemd)   ┌───────────── DOCKER (cosma_auv image) ──┐ │
-│    │  reads .revive_request      │                                        │ │
-│    │  ◄─(bridge 3: a FILE)────── │  gopro_manager  (persistent, -d)       │ │
-│    ▼                             │    arm · record · watchdog · EMERGENCY │ │
-│  uhubctl  ── cuts Vbus on a      │        ▲                               │ │
-│  socket that is OFF the bus      │        │ (bridge 2: ROS 2 DDS,         │ │
-│         │                        │        ▼   UDP-localhost)              │ │
-│         │                        │  pi_menu  (transient, --rm -it)        │ │
-│         ▼                        │    the recording UI                    │ │
-│  ┌──────────────┐                └────────────────────────────────────────┘ │
-│  │ MEGA4 USB hub│  per-port Vbus (PPPS)                                      │
-│  └──────┬───────┘                                                           │
-│    ┌────┴────┐         each GoPro = a USB-Ethernet device at 172.2x.x.51    │
-│   GoPro L   GoPro R    (wired Open GoPro HTTP API on :8080)                  │
+│  gopro_ctl.sh ──(docker exec: ros2 service call)────────────────┐          │
+│  download.sh / gopro_download.py ──HTTP :8080──► cameras ──► SSD │          │
+│  gopro_delete.py ──────────────── HTTP :8080──► cameras         │          │
+│                                                                 ▼          │
+│  revive.sh (watcher, systemd)   ┌──────── DOCKER (cosma_auv image) ──────┐ │
+│    │  reads .revive_request      │                                       │ │
+│    │  ◄──(a FILE)─────────────── │  gopro_manager  (persistent service)  │ │
+│    ▼                             │    arm · record · watchdog · EMERGENCY│ │
+│  uhubctl ── cuts Vbus on a       └───────────────────────────────────────┘ │
+│  socket that is OFF the bus                                                 │
+│         │                                                                   │
+│  ┌──────────────┐   per-port Vbus (PPPS)                                    │
+│  │   USB hub    │                                                           │
+│  └──────┬───────┘   each GoPro = a USB-Ethernet device at 172.2x.x.51       │
+│    ┌────┴────┐      (wired Open GoPro HTTP API on :8080)                     │
+│   GoPro L   GoPro R                                                          │
 └─────────────────────────────────────────────────────────────────────────────┘
 
-  Bridge 1  menu.sh — a host launcher that `docker run`s the pi_menu container.
-  Bridge 2  ROS 2 DDS — gopro_manager ◄──► pi_menu (topics/services, UDP-local).
-  Bridge 3  .revive_request FILE — the manager (in Docker, no uhubctl) writes
-            "hub:port" to it; revive.sh (host) reads it and power-cycles that
-            socket. This is how a brown-out camera gets a Vbus cycle without
-            giving the container any USB-power privileges.
+  Control    gopro_ctl.sh runs `docker exec ... ros2 service call` INTO the
+             manager container, so the manager (and its watchdog) stays in charge.
+  Recovery   the manager (in Docker, no uhubctl) writes "hub:port" to
+             .revive_request; revive.sh (on the host) reads it and power-cycles
+             that socket -- an off-bus camera gets a Vbus cycle without giving the
+             container any USB-power privileges.
 ```
 
-Why the split: ROS nodes need the ROS image → Docker. `uhubctl` (USB power) and
-the SSD need host privileges/access → host. Cameras are identified by **USB socket
-(hub, port)**, never by a fixed IP, so a swapped camera in the same port just works.
+Why the split: ROS nodes need the ROS image → Docker; `uhubctl` (USB power) and
+the SSD need host access → host. Cameras are identified by **USB socket (hub,
+port)**, never a fixed IP, so a swapped camera in the same port just works.
 
-The repo is laid out to mirror the deployment, so `install.sh` just drops each
-half in place (ROS packages -> the workspace, host scripts -> `gopro_scripts/`):
+### Resilience (autonomous)
+- **Adopt in-progress recording** -- if the manager restarts while filming, it adopts the recording (no re-arm, no beep).
+- **Watchdog** -- a dropped camera → `DEGRADED` while the first recovery (re-arm + restart, **no power-cut**) is in flight; recovers as soon as it answers again.
+- **EMERGENCY** (`FAULT` = the AUV should hold/stop) -- raised when recovery keeps failing, or all cameras drop at once, or a camera is SD-unusable, or one stays lost past `fault_after_seconds`. Self-clears the instant a camera films again.
+- **Auto-resume after reboot** -- a persistent intent flag resumes recording (a new timestamped segment) after an involuntary reboot.
+- **Auto-revive** -- a camera **off the USB bus** is power-cycled by the host watcher, then re-armed by the manager. Fully autonomous.
 
-```
-install.sh / uninstall.sh   # one-command add/remove on any base-image Pi
-ros2_pkgs/                  # the ROS half -> built in the cosma_auv container
-  gopro_control/gopro_control/
-    core/          # ROS-independent engine (urllib only, no extra deps)
-      camera.py    # GoPro class: discovery, state, control
-      settings.py  # Open GoPro setting maps + validation + ordered apply
-      cli.py       # dev CLI for live testing without ROS
-    nodes/
-      gopro_manager_node.py   # the manager node
-      pi_menu_node.py         # the recording console
-  gopro_msgs/      # GoProStatus.msg, GoProSystem.msg, GoProSettings.srv
-host/                        # the HOST half -> installed into gopro_scripts/
-  gopro.sh                  # unified operator menu (entry point): record / offload / wipe / manager
-  manager_up.sh / manager_down.sh / manager_log.sh / menu.sh
-  revive.sh                 # one-shot or --watch auto-revive (uses host uhubctl)
-  gopro_download.py         # offload footage -> SSD (robust, resumable, live progress)
-  gopro_delete.py           # delete / wipe media on the cameras
-  systemd/                  # gopro-manager / gopro-autorevive service TEMPLATES (paths filled in at install)
-tests/             # automated ROS-interface test suite
-```
-
----
-
-## Features
-
-**Recording & operator flow**
-- **Persistent manager**, decoupled from the menu — keeps running while the AUV
-  is underwater and after the operator drops SSH.
-- **Barrier-synced** two-camera start/stop **and clock-sync** — both cameras get
-  the same UTC second, so segments re-align in post even if start isn't perfectly
-  simultaneous.
-- **Operator console** (`pi_menu`) with **live status refresh** (the banner
-  updates the instant a camera drops — `DEGRADED`/`EMERGENCY` — without a
-  keypress) and clear guards (no double-start beep, can't change settings while
-  recording).
-- **Settings** (resolution/fps/fov/hypersmooth/wind/mode) with **validation**
-  (rejects impossible combos) and **inter-setting delays** the Hero 12 needs.
-
-**Resilience (autonomous)**
-- **Adopt in-progress recording**: if the manager restarts while filming, it
-  detects and adopts the recording (no re-arm, no beep).
-- **Watchdog**: a camera that stops/drops → `DEGRADED` while its **first**
-  recovery attempt is in flight (re-arm + restart, **no power-cycle**); the AUV
-  can slow down. Recovers as soon as it answers again.
-- **EMERGENCY signal** (`FAULT` = the AUV should stop): raised as soon as a
-  dropped camera's **first recovery attempt has failed** (kept retrying), **or**
-  all cameras drop at once (nothing is filmed → immediate), **or** a camera is
-  SD-unusable, **or** — as a backstop — any camera stays lost past `fault_after`
-  (e.g. a slow self-repair that never reached a retry). `FAULT` is what the
-  autonomy layer consumes (`state == GoProSystem.STATE_FAULT`); it self-clears
-  the instant the camera records again.
-- **Auto-resume after reboot**: a persistent intent flag means an involuntary
-  reboot that interrupted a mission **resumes recording on its own** (a new,
-  timestamped segment).
-- **Boot-robust discovery**: retries discovery at startup (USB may not be up yet
-  when the auto-restarted manager starts).
-- **Auto-revive** (host watcher): a camera that falls **off the USB bus** is
-  power-cycled automatically, then re-armed by the manager — fully autonomous.
-  Safe by construction (see below).
-
-**Safety (SD card)**
-- Vbus is cut **only** on a camera **confirmed off the bus** for several
-  consecutive scans (~6 s) — never a visible camera (it might be recording),
-  never on a 1 s blip. A camera off the bus is idle, so its SD can't be corrupted.
-- Cameras are tracked **by hub port**, not serial — a flooded camera swapped for
-  a fresh one in the same socket works with no code change.
-
----
-
-## Operating
-
-One-time setup builds the packages, installs the host scripts + boot services,
-so the manager + watcher start automatically on power-up and the cameras arm
-themselves — no manual step:
-
-```bash
-./install.sh             # build + host scripts + sudoers + boot services (idempotent)
-```
-
-`gopro_scripts/gopro.sh` is then the single operator entry point (run on the Pi):
-
-```
-=== AUV GoPro ===  (SSD: mounted)
-  [1] Recording (record / stop / settings)    -> the ROS console
-  [2] Copy videos -> SSD                       -> live %/speed/ETA
-  [3] Delete / wipe the cards
-  [4] Start / stop the manager
-  [5] Inspect / verify SSD                     -> what's copied + completeness check
-```
-
-Typical mission: power on (cameras auto-arm) → `gopro.sh [1]` to start the take,
-put the AUV in the water, close SSH (the manager keeps running and auto-resumes
-a new segment if a reboot interrupts the take) → after the dive, reconnect,
-`gopro.sh [1]` [2] to stop, then [2] to offload to the SSD and [3] to wipe the
-cards once the footage is safe.
-
-Recovery helper (also runs automatically as the watcher service):
-```bash
-./revive.sh            # one-shot: power-cycle a camera confirmed off the bus
-```
+### Safety (SD card)
+Vbus is cut **only** on a camera confirmed **off the bus** for several scans
+(~6 s) -- never a visible/recording camera, never on a 1 s blip. A camera off the
+bus is idle, so its SD card cannot be corrupted.
 
 ---
 
@@ -189,116 +154,60 @@ Node `gopro_manager` (private namespace):
 | Interface | Type | Purpose |
 |---|---|---|
 | `~/record` | `std_srvs/SetBool` | `true` start / `false` stop, all cameras (barrier-synced) |
-| `~/settings` | `gopro_msgs/GoProSettings` | apply capture settings to all cameras |
-| `~/status` | `gopro_msgs/GoProStatus` | per-camera health, published each tick |
+| `~/settings` | `gopro_msgs/GoProSettings` | apply capture settings |
+| `~/status` | `gopro_msgs/GoProStatus` | per-camera health, each tick |
 | `~/system` | `gopro_msgs/GoProSystem` | overall state: `INITIALIZING`/`READY`/`RECORDING`/`DEGRADED`/`FAULT` |
 
-`FAULT` is the **emergency** signal for the autonomy layer.
+`FAULT` is the **EMERGENCY** signal for the autonomy layer (`state == GoProSystem.STATE_FAULT`).
 
-The manager's state machine (published on `~/system`, one tick = `tick_period`):
-
+State machine (published on `~/system`):
 ```
-                  all cameras armed & verified
-   INITIALIZING ─────────────────────────────► READY
-        │  (discovery_timeout)                   │  ▲
-        │                                        │  │ stop  (~/record false)
-        │                              start ────┘  │
-        │                            (~/record      │
-        ▼                              true)        │
-   (cameras missing/SD bad)                ┌──► RECORDING ◄─┐
-        │                                  │        │       │ camera records
-        └──────────────────────────────┐  │        │       │  again
-                                        │  │  a camera drops │ (auto-clears)
-                                        ▼  │        ▼       │
-                                     DEGRADED ──────────────┘
-                              (1st recovery attempts in flight)
-                                        │
-                 recovery fails (≥ fault_after_attempts),
-                 OR lost > fault_after, OR SD unusable,
-                 OR all cameras stopped filming at once
-                                        ▼
-                                   FAULT  ── EMERGENCY: the AUV should hold/stop.
-                                            Self-clears the instant a camera films
-                                            again. Recovery is software-first; a
-                                            real Vbus cycle is requested only for a
-                                            brown-out camera that is NOT recording.
+   INITIALIZING ──(all cameras armed)──► READY ◄── stop ── RECORDING
+        │ (cameras missing / SD bad)             start ─►     │
+        ▼                                     a camera drops   │ (films again -> clears)
+      FAULT ◄── recovery keeps failing / lost > fault_after_seconds /
+        │        SD unusable / all cameras stopped at once ──► DEGRADED
+        └─► EMERGENCY: the AUV should hold. Recovery is software-first; a real Vbus
+            cycle is requested only for an off-bus / brown-out camera.
 ```
 
-### Parameters (`params/gopro_params.yaml`)
+### Parameters (`params/gopro_params.yaml`, loaded at manager (re)start)
 `camera_labels`, `tick_period` (1 s), `strikes_before_restart` (2),
-`fault_after_attempts` (2), `record_grace_period` (10 s), `restart_cooldown`
-(0 s), `fault_after` (30 s), `discovery_timeout` (20 s), `resume_on_restart`
-(true), `state_file`. Brown-out Vbus recovery: `vbus_recover_after` (3),
-`vbus_cooldown` (45 s), `vbus_request_file`. The file is loaded at runtime
-(`manager_up.sh` passes it with `--params-file`), so editing a value takes effect
-on the next manager restart.
+`fault_after_attempts` (9), `unreliable_after` (3), `record_grace_period` (10 s),
+`restart_cooldown` (5 s), `fault_after_seconds` (45 s), `discovery_timeout` (20 s),
+`resume_on_restart` (true). Brown-out Vbus recovery: `vbus_recover_after` (3),
+`vbus_cooldown` (45 s), `vbus_request_file`.
 
 ---
 
-## Install on another Pi
+## Repo layout
 
-The GoPro rig is a **self-contained add-on**: it adds two ROS packages and a
-`gopro_scripts/` folder, modifies **no** existing AUV package, and needs **no
-Docker image change** (the ROS code is built into the mounted workspace, not
-baked into the image). So any Pi that already has the base AUV setup (the
-`cosma_auv` image + the `swarm-vehicle` workspace) gets the cameras with:
-
-**Prerequisites on the target Pi:** the `cosma_auv` Docker image, the
-`~/dev/swarm-vehicle` workspace, internet access, and `uhubctl` (for the Vbus
-watcher). And — easy to miss — **the Pi must be on the correct date/time**.
-
-> ⚠️ **Set the clock first.** A freshly flashed Pi with no NTP can boot with its
-> clock far in the past (stuck near the image build date). That makes
-> `apt-get update` reject the repo files (*"Release file is not valid yet"*) and
-> breaks TLS, so `git clone` and `apt install` fail confusingly. Fix it before
-> anything else:
-> ```bash
-> sudo timedatectl set-ntp true            # once the Pi has internet, or:
-> sudo date -u -s "YYYY-MM-DD HH:MM:SS"     # set UTC manually from a host on time
-> timedatectl                               # verify the date is correct
-> ```
-
-From-scratch install (base-image Pi → working GoPro rig):
-
-```bash
-sudo apt update && sudo apt install -y uhubctl       # Vbus watcher dependency
-git clone https://github.com/mel91240/gopro_manager_pi.git
-cd gopro_manager_pi
-./install.sh                       # detects the workspace; build + scripts + services
-# non-default locations:
-GOPRO_WS=/path/to/swarm-vehicle COSMA_IMAGE=myimg:tag ./install.sh
-# update later:  cd gopro_manager_pi && git pull && ./install.sh   (idempotent)
-./uninstall.sh                     # remove (footage is never touched; --purge also drops packages)
 ```
-
-`install.sh` is idempotent (re-run to update) and does, on the target Pi:
-1. copy `ros2_pkgs/gopro_control` + `gopro_msgs` into `<ws>/ros2_ws/src/`;
-2. `colcon build` them inside the `cosma_auv` container (ROS 2 Humble lives only
-   in the image, not on the host);
-3. install the `host/` scripts into `<ws>/gopro_scripts/`;
-4. install the `uhubctl` sudoers rule (the watcher cuts Vbus via `sudo -n uhubctl`);
-5. install + enable the two systemd services (paths/user injected from the
-   `host/systemd/*.in` templates — nothing is hard-coded to one Pi).
-
-The manager + menu containers use `--network host -e ROS_DOMAIN_ID=0
--e ROS_LOCALHOST_ONLY=1` plus a FastDDS UDP-only profile
-(`FASTRTPS_DEFAULT_PROFILES_FILE=.../fastdds_udp_only.xml`). `--ipc host` is
-deliberately NOT used: each container has a private `/dev/shm`, so shared-memory
-DDS would discover topics yet deliver no data (and leak SHM on `docker rm -f`);
-UDP-localhost is robust for these tiny messages. The scripts set these.
+install.sh / uninstall.sh   # one-command add/remove on any base-image Pi
+ros2_pkgs/                  # the ROS half -> built in the cosma_auv container
+  gopro_control/gopro_control/
+    core/          # ROS-independent engine (urllib only, no extra deps)
+      camera.py    # GoPro class: discovery, state, control, Vbus (uhubctl)
+      settings.py  # Open GoPro setting maps + validation + ordered apply
+      cli.py       # dev CLI for live testing without ROS
+    nodes/gopro_manager_node.py   # the manager node
+  gopro_msgs/      # GoProStatus.msg, GoProSystem.msg, GoProSettings.srv
+host/                        # the HOST half -> installed into gopro_scripts/
+  gopro_ctl.sh              # operator control: record / stop / status / settings / solo / duo
+  download.sh + gopro_download.py   # offload footage -> SSD (robust, resumable)
+  gopro_delete.py           # delete / wipe media on the cameras
+  revive.sh                 # auto-revive watcher (--watch); uses host uhubctl
+  manager_up.sh / manager_down.sh / manager_log.sh
+  systemd/                  # gopro-manager / gopro-autorevive service TEMPLATES
+tests/             # automated ROS-interface test suite
+```
 
 ---
 
 ## Hardware notes / lessons learned
-
-- **USB cable matters.** The Hero 12 is a USB 2.0 device. A USB 3 cable forces a
-  marginal SuperSpeed link that drops under recording load. **Use USB 2.0 cables.**
-- **Power budget.** Two Hero 12 recording 4K can peak ~1.5 A each. A 5 V/3 A hub
-  supply is marginal (brown-out → "NOT ENOUGH POWER" → zombie state on a camera).
-  **Use 5 V/4–5 A+.**
-- **Reboot interrupts recording** (USB bus reset), but the GoPro recovers the
-  in-progress file on next boot, and the manager auto-resumes a new segment.
-- **SD safety.** Cutting Vbus while a camera is *visible/recording* can corrupt
-  the card; cutting Vbus on a camera that is *off the bus* (idle) is safe and is
-  the only cure for a "zombie" camera (answers `/state` but `/shutter` 500).
+- **USB cable / uplink matters most.** The Hero 12 is a USB 2.0 device. A marginal or USB-3 uplink to the hub forces a flaky SuperSpeed link that drops under recording load -- the **#1 cause of "cameras drop mid-record"**. Use good USB 2.0 cables, firmly seated.
+- **Power budget.** Two Hero 12 recording 4K draw a lot (no battery, all on USB). A marginal hub supply browns out into a zombie state. Use a solid **5 V / 4-5 A+** supply.
+- **A wedged hub survives a Pi reboot** (it is self-powered): if all cameras drop at once and `dmesg` shows repeated `usb ... error -110`, physically power-cycle the hub.
+- **Reboot interrupts recording** (USB bus reset), but the GoPro recovers the in-progress file on next boot and the manager auto-resumes a new segment.
+- **SD safety.** Cutting Vbus on a *visible/recording* camera can corrupt the card; on an *off-bus* (idle) camera it is safe -- and the only cure for a "zombie" camera (answers `/state` but `/shutter` 500).
 ```
