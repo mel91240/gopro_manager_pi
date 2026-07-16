@@ -34,7 +34,7 @@ the right size is skipped -> an interrupted run just resumes.
   ./download.sh --all            include tiny (<2 MB) test clips too
   GOPRO_DEST=/mnt/ssd ./download.sh
 
-Run from gopro.sh [2] (the operator menu) or directly via download.sh. The core
+Run via download.sh (it auto-mounts the SSD and retries). The core
 helpers discover() / gather() / download_all() are importable for reuse.
 """
 import argparse
@@ -132,6 +132,11 @@ def discover():
     return cams
 
 
+def _warn(msg):
+    """Surface a swallowed/unexpected error on stderr, so nothing fails silently."""
+    print(f"  [warn] {msg}", file=sys.stderr)
+
+
 def usb_speed(iface):
     """USB link speed in Mbps for a camera's ethernet-gadget iface (480=USB2,
     5000=USB3), or None if it can't be read."""
@@ -140,12 +145,13 @@ def usb_speed(iface):
         for _ in range(8):
             sp = os.path.join(p, "speed")
             if os.path.isfile(sp):
-                return int(open(sp).read().strip())
+                with open(sp) as fh:
+                    return int(fh.read().strip())
             p = os.path.dirname(p)
             if p in ("/", "/sys"):
                 break
-    except Exception:
-        pass
+    except Exception as e:
+        _warn(f"usb_speed({iface}): {e}")
     return None
 
 
@@ -180,8 +186,9 @@ def fetch_duration(ip, f):
     try:
         info = json.loads(_get(ip, f"/gopro/media/info?path={f['dir']}/{f['name']}", timeout=8))
         f["dur"] = int(float(info.get("dur", 0)))
-    except Exception:
+    except Exception as e:
         f["dur"] = None
+        _warn(f"duration {f['name']}: {e}")
     return f
 
 
@@ -201,8 +208,8 @@ def _reinit(ip):
         _reinit_state[ip] = now
     try:
         _get(ip, "/gopro/camera/control/wired_usb?p=1", timeout=8)
-    except Exception:
-        pass
+    except Exception as e:
+        _warn(f"reinit {ip}: {e}")
 
 
 def _url(ip, f):
@@ -252,13 +259,9 @@ def _retrying(ip, fn):
         try:
             fn()
             return
-        except OSError as e:
-            if e.errno == errno.ENOSPC:
-                raise NoSpaceError("destination filesystem is full") from e
-            last = e
-            _reinit(ip)
-            time.sleep(BACKOFF)
         except Exception as e:
+            if isinstance(e, OSError) and e.errno == errno.ENOSPC:
+                raise NoSpaceError("destination filesystem is full") from e
             last = e
             _reinit(ip)
             time.sleep(BACKOFF)
@@ -343,7 +346,7 @@ class Progress:
         filled = int(pct / 5)
         bar = "#" * filled + "-" * (20 - filled)
         return (f">>> [{bar}] {pct:4.1f}%  {done/1e9:.2f}/{total/1e9:.2f} GB  "
-                f"{spd:5.1f} MB/s  restant {_fmt_eta(eta):>7}  files {fd}/{ft}")
+                f"{spd:5.1f} MB/s  ETA {_fmt_eta(eta):>7}  files {fd}/{ft}")
 
 
 def _reporter(progress):
@@ -379,7 +382,7 @@ def _reporter(progress):
             time.sleep(1.0)
 
 
-def _download_one(ip, label, f, dest, lock, c, progress=None):
+def _download_one(ip, label, f, dest, lock, counters, progress=None):
     """Returns 'ok' (downloaded or already present), 'fail', or 'gone' (camera
     unreachable). Raises NoSpaceError if the destination filled up."""
     # Sanitize the camera-supplied name so it can never escape the output dir
@@ -413,8 +416,8 @@ def _download_one(ip, label, f, dest, lock, c, progress=None):
         if os.path.getsize(tmp) == size and _looks_like_mp4(tmp):
             os.replace(tmp, out)
             with lock:
-                c["n"] += 1
-                c["bytes"] += size
+                counters["n"] += 1
+                counters["bytes"] += size
             if progress is not None:
                 progress.file_done()
             return "ok"
@@ -429,14 +432,14 @@ def _download_one(ip, label, f, dest, lock, c, progress=None):
         else:
             reason = "size mismatch; .part kept for resume"
         with lock:
-            c["fail"] += 1
+            counters["fail"] += 1
         _emit(f"  [{label}] FAIL  {name} ({reason})")
         return "fail"
     except NoSpaceError:
         raise                                  # fatal: stop the whole offload
     except Exception as e:
         with lock:
-            c["fail"] += 1
+            counters["fail"] += 1
         _emit(f"  [{label}] FAIL  {name}: {e}  (.part kept for resume)")
         return "gone" if _is_gone(e) else "fail"
 
@@ -446,8 +449,8 @@ def guard_dest_mounted(dest):
     when the SSD failed to mount). That dir then lives on the Pi's small root
     filesystem, so a multi-GB offload would silently fill the rootfs (and on this
     rig /mnt/ssd is a whole Jetson rootfs). Only enforced for conventional mount
-    roots (/mnt, /media); a home-directory dest stays unrestricted. gopro.sh does
-    this via ensure_dest(), but the downloader can be invoked directly too."""
+    roots (/mnt, /media); a home-directory dest stays unrestricted. download.sh
+    auto-mounts via ensure_mount(), but the downloader can be invoked directly too."""
     p = os.path.abspath(dest)
     for root in ("/mnt", "/media"):
         if p == root or p.startswith(root + os.sep):
@@ -456,7 +459,7 @@ def guard_dest_mounted(dest):
             if not os.path.ismount(mp):
                 sys.exit(f"!!! refusing to download to {dest}: {mp} is NOT mounted "
                          f"-- this would fill the Pi's root filesystem. Mount it first "
-                         f"(gopro.sh does this automatically), or pass a different --dest.")
+                         f"(download.sh auto-mounts it), or pass a different --dest.")
             return
 
 
@@ -466,7 +469,7 @@ def download_all(jobs, dest, lock=None, counters=None, parallel=False):
     parallel: download cameras at once (use only when all cameras are USB3 --
     see auto_parallel())."""
     lock = lock or threading.Lock()
-    c = counters if counters is not None else {"n": 0, "bytes": 0, "fail": 0}
+    counters = counters if counters is not None else {"n": 0, "bytes": 0, "fail": 0}
 
     total_bytes = sum(f["size"] for _, _, files in jobs for f in files)
     total_files = sum(len(files) for _, _, files in jobs)
@@ -480,14 +483,14 @@ def download_all(jobs, dest, lock=None, counters=None, parallel=False):
     def camera_worker(label, ip, files):
         gone = 0
         for i, f in enumerate(files):
-            st = _download_one(ip, label, f, dest, lock, c, progress)
+            st = _download_one(ip, label, f, dest, lock, counters, progress)
             if st == "gone":
                 gone += 1
                 if gone >= GONE_LIMIT:            # camera left -> don't burn retries on the rest
                     remaining = len(files) - i - 1
                     if remaining:
                         with lock:
-                            c["fail"] += remaining
+                            counters["fail"] += remaining
                         _emit(f"  [{label}] unreachable for {gone} clips -> abandoning "
                               f"{remaining} remaining (re-run when it's back; resumable).")
                     break
@@ -511,7 +514,7 @@ def download_all(jobs, dest, lock=None, counters=None, parallel=False):
             with _print_lock:
                 sys.stdout.write("\r\033[K")
                 sys.stdout.flush()
-    return c
+    return counters
 
 
 def _ts(epoch):
@@ -546,17 +549,20 @@ def gather(cams, minsize, minsec):
 # --- interactive selection (--pick) ------------------------------------------
 def _parse_selection(s, n):
     s = s.strip().lower()
-    if s in ("", "all", "tout", "*"):
+    if s in ("", "all", "*"):
         return set(range(n))
     keep = set()
     for part in re.split(r"[,\s]+", s):
         if not part:
             continue
-        if "-" in part:
-            a, b = part.split("-", 1)
-            keep.update(range(int(a) - 1, int(b)))
-        else:
-            keep.add(int(part) - 1)
+        try:
+            if "-" in part:
+                a, b = part.split("-", 1)
+                keep.update(range(int(a) - 1, int(b)))
+            else:
+                keep.add(int(part) - 1)
+        except ValueError:
+            print(f"  [skipped] not a number: {part!r}", file=sys.stderr)
     return {i for i in keep if 0 <= i < n}
 
 
@@ -572,11 +578,11 @@ def pick(jobs):
         print(f"  {i:>2}  {lbl:<6}  {_ts(f['cre'])}  {f['size'] // 1_000_000:>4} MB  {f['name']} {dur}")
     print()
     try:
-        sel = input("  Which to copy? (e.g. 1-3,5  /  'all'  /  q = annuler) : ")
+        sel = input("  Which to copy? (e.g. 1-3,5  /  'all'  /  q = cancel) : ")
     except EOFError:
         sel = "all"
-    if sel.strip().lower() in ("q", "quit", "cancel", "annuler"):
-        print(">>> annulé (rien copié).")
+    if sel.strip().lower() in ("q", "quit", "cancel"):
+        print(">>> cancelled (nothing copied).")
         return []
     keep = _parse_selection(sel, len(flat))
     chosen = {}
@@ -612,12 +618,12 @@ def verify(jobs, dest):
         print(f"  [{label}] cameras: {len(files)} clip(s) / {cam_mb} MB  ->  "
               f"{len(files) - len(missing)} fully on SSD, {len(missing)} missing/incomplete")
         for f in missing:
-            print(f"     ✗ {_ts(f['cre'])}_{f['name']}  ({f['size'] // 1_000_000} MB)")
+            print(f"     x {_ts(f['cre'])}_{f['name']}  ({f['size'] // 1_000_000} MB)")
         grand_missing += len(missing)
     if grand_missing == 0:
-        print(">>> ✅ all camera clips have a same-size copy on the SSD -- copy is complete.")
+        print(">>> OK: all camera clips have a same-size copy on the SSD -- copy is complete.")
     else:
-        print(f">>> ⚠️ {grand_missing} clip(s) missing/incomplete -- re-run the copy to finish.")
+        print(f">>> WARN: {grand_missing} clip(s) missing/incomplete -- re-run the copy to finish.")
     return grand_missing
 
 
@@ -679,12 +685,12 @@ def main():
     guard_dest_mounted(args.dest)   # never silently fill the Pi root if the SSD isn't mounted
     print(f">>> downloading {total} clip(s) from {len(jobs)} camera(s) [{mode}] -> {args.dest}")
     t0 = time.time()
-    c = download_all(jobs, args.dest, parallel=parallel)
+    counters = download_all(jobs, args.dest, parallel=parallel)
     dt = time.time() - t0
-    rate = (c["bytes"] / dt / 1e6) if dt else 0
-    print(f">>> done: {c['n']} file(s), {c['bytes'] // 1_000_000} MB in {_fmt_eta(dt)} "
-          f"({rate:.1f} MB/s) -> {args.dest}   (failures: {c['fail']})")
-    return 1 if c["fail"] else 0
+    rate = (counters["bytes"] / dt / 1e6) if dt else 0
+    print(f">>> done: {counters['n']} file(s), {counters['bytes'] // 1_000_000} MB in {_fmt_eta(dt)} "
+          f"({rate:.1f} MB/s) -> {args.dest}   (failures: {counters['fail']})")
+    return 1 if counters["fail"] else 0
 
 
 if __name__ == "__main__":

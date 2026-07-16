@@ -1,5 +1,5 @@
 #!/bin/bash
-# download.sh — offload GoPro footage -> USB SSD, reliably, on a Raspberry Pi 4 rig.
+# download.sh -- offload GoPro footage -> USB SSD, reliably, on a Raspberry Pi 4 rig.
 #
 # Portable across Pi 4 units (same OS image): the SSD device node and hub ports
 # are auto-detected, not hard-coded.
@@ -61,21 +61,21 @@ detect_ssd(){
 # --- Warn if UAS is not disabled (the #1 stability requirement on Pi 4) ---
 check_uas(){
   if ! grep -qE 'usb-storage\.quirks=[^ ]*:u' /proc/cmdline; then
-    log "ATTENTION: aucun quirk 'usb-storage.quirks=<VID:PID>:u' dans /proc/cmdline."
-    log "  -> l'UAS n'est peut-etre pas desactive pour le SSD; sans ca le transfert peut planter le VL805."
-    log "  -> Fix: ajouter usb-storage.quirks=<VID:PID>:u dans /boot/firmware/cmdline.txt puis reboot (voir README)."
+    log "WARNING: no 'usb-storage.quirks=<VID:PID>:u' quirk in /proc/cmdline."
+    log "  -> UAS may not be disabled for the SSD; without it the transfer can wedge the VL805."
+    log "  -> Fix: add usb-storage.quirks=<VID:PID>:u to /boot/firmware/cmdline.txt then reboot (see README)."
   fi
 }
 
 # --- Ensure the SSD is mounted (fsck it first if it was left dirty by a crash) ---
 ensure_mount(){
   if mountpoint -q "$DEST"; then return 0; fi
-  local dev; dev="$(detect_ssd)" || { log "ERREUR: aucun SSD USB exFAT trouve (branche-le, ou GOPRO_SSD_DEV=...)."; exit 1; }
-  log "SSD non monte -> fsck + montage de $dev sur $DEST"
+  local dev; dev="$(detect_ssd)" || { log "ERROR: no USB exFAT SSD found (plug it in, or set GOPRO_SSD_DEV=...)."; exit 1; }
+  log "SSD not mounted -> fsck + mount $dev on $DEST"
   sudo fsck.exfat -y "$dev" 2>&1 | logpipe
   sudo mkdir -p "$DEST"
   sudo mount -o uid="$(id -u)",gid="$(id -g)",umask=022 "$dev" "$DEST" \
-    && log "monte: $dev -> $DEST" || { log "ECHEC montage $dev sur $DEST"; exit 1; }
+    && log "mounted: $dev -> $DEST" || { log "FAILED to mount $dev on $DEST"; exit 1; }
 }
 
 # --- Both cameras reachable over HTTP right now? (ping is useless for GoPro) ---
@@ -95,14 +95,14 @@ PY
 
 # --- Vbus power-cycle every GoPro port (recovers a camera whose NCM link is dead) ---
 revive_cameras(){
-  log "revive: power-cycle Vbus des ports GoPro"
+  log "revive: power-cycle Vbus of the GoPro ports"
   sudo "$UHUBCTL" 2>/dev/null | awk '
       /Current status for hub/ { hub=$5 }
       /Port [0-9]+:.*GoPro/    { p=$2; sub(":","",p); print hub, p }' \
   | while read -r hub port; do
       [ -n "$hub" ] && sudo "$UHUBCTL" -l "$hub" -p "$port" -a cycle -d 15 2>&1 | logpipe
     done
-  log "revive: attente re-arm des cameras (~30s)"
+  log "revive: waiting for cameras to re-arm (~30s)"
   sleep 30
 }
 
@@ -112,27 +112,27 @@ count(){ find "$DEST" -type f -name '*.MP4' 2>/dev/null | wc -l ; }
 check_uas
 ensure_mount
 cd "$HERE"; export PYTHONPATH="$HERE"
-log "cible: $DEST | mode: SEQUENTIEL (parallele interdit sur ce Pi 4) | minsec: $MINSEC"
+log "target: $DEST | mode: SEQUENTIAL (parallel forbidden on this Pi 4) | minsec: $MINSEC"
 
 prev=-1
 for pass in $(seq 1 "$MAX_PASSES"); do
-  log "=== passe $pass / $MAX_PASSES ==="
+  log "=== pass $pass / $MAX_PASSES ==="
   # --minsec BEFORE EXTRA so a user-supplied --minsec on the CLI wins (argparse: last one applies)
   python3 -u "$HERE/gopro_download.py" --sequential --minsec "$MINSEC" --dest "$DEST" "${EXTRA[@]}" 2>&1 | logpipe
   now=$(count)
-  log "passe $pass: $now fichiers MP4 sur le SSD"
+  log "pass $pass: $now MP4 files on the SSD"
 
   if [ "$now" -gt "$prev" ]; then
     prev="$now"; continue                 # progress -> keep going
   fi
   if cameras_ok; then
-    log "aucun nouveau fichier et les 2 cameras repondent -> TERMINE"
+    log "no new file and both cameras respond -> DONE"
     break
   fi
-  log "aucun progres ET une camera ne repond plus -> revive puis nouvelle passe"
+  log "no progress AND a camera stopped responding -> revive then new pass"
   revive_cameras
   prev="$now"
 done
 
-log "=== BILAN: $(count) fichiers MP4, $(du -sh "$DEST" 2>/dev/null | cut -f1) sur $DEST ==="
-log "termine — journal complet groupe dans ./manager_log.sh (identifiant 'download')."
+log "=== SUMMARY: $(count) MP4 files, $(du -sh "$DEST" 2>/dev/null | cut -f1) on $DEST ==="
+log "done -- full log grouped in ./manager_log.sh (identifier 'download')."

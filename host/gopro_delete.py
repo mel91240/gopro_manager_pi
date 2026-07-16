@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Delete recorded media from the GoPros (Open GoPro wired HTTP API).
 
-⚠️  DESTRUCTIVE and IRREVERSIBLE -- there is NO undo on the camera.
+WARNING: DESTRUCTIVE and IRREVERSIBLE -- there is NO undo on the camera.
 
 The Open GoPro HTTP API has no low-level FORMAT command. "Delete all" here
 removes every media file one by one (endpoint /gopro/media/delete/file). The
@@ -92,7 +92,7 @@ def show(jobs):
     return flat
 
 
-def run_deletion(targets, yes, what):
+def run_deletion(targets, yes, what, full_wipe=False):
     """targets = [(label, ip, file), ...]. Confirm, then delete. Returns counts."""
     if not targets:
         print(">>> nothing to delete.")
@@ -100,16 +100,18 @@ def run_deletion(targets, yes, what):
     n = len(targets)
     size = sum(f["size"] for _, _, f in targets) // 1_000_000
     cams = ", ".join(sorted({lbl for lbl, _, _ in targets}))
-    print(f"\n⚠️  About to DELETE {n} clip(s), {size} MB from {cams} ({what}).")
+    print(f"\n!!! About to DELETE {n} clip(s), {size} MB from {cams} ({what}).")
     print("    This is IRREVERSIBLE -- there is no undo on the camera.")
     if not yes:
-        prompt = "Type DELETE to confirm: " if what == "ALL media" else "Delete these? type 'yes': "
-        want = "DELETE" if what == "ALL media" else "yes"
+        # The confirmation strength is driven by an explicit flag, NOT by matching
+        # the display label `what` -- so renaming the label can never weaken it.
+        want = "all" if full_wipe else "yes"
+        prompt = "Type 'all' to confirm this FULL wipe: " if full_wipe else "Delete these? type 'yes': "
         try:
             ans = input(f"    {prompt}")
         except EOFError:
             ans = ""
-        if ans.strip() != want:
+        if ans.strip().lower() != want:
             print(">>> aborted (nothing deleted).")
             return 0, 0
 
@@ -122,11 +124,11 @@ def run_deletion(targets, yes, what):
             freed += f["size"]
         else:
             fail += 1
-        pct = i / n * 100
-        filled = int(pct / 5)
-        bar = "#" * filled + "-" * (20 - filled)
-        line = f">>> [{bar}] {pct:4.0f}%  deleting {i}/{n}  {freed // 1_000_000} MB freed"
         if tty:
+            pct = i / n * 100
+            filled = int(pct / 5)
+            bar = "#" * filled + "-" * (20 - filled)
+            line = f">>> [{bar}] {pct:4.0f}%  deleting {i}/{n}  {freed // 1_000_000} MB freed"
             sys.stdout.write("\r\033[K" + line)
             sys.stdout.flush()
     if tty:
@@ -158,7 +160,7 @@ def main():
     # never delete on a camera that is recording
     live = [c for c in cams if is_recording(c[1])]
     if live:
-        print("⚠️  REFUSING: these cameras are RECORDING -- stop the take first: "
+        print("!!! REFUSING: these cameras are RECORDING -- stop the take first: "
               + ", ".join(f"{l}({ip})" for l, ip, _ in live))
         return 1
 
@@ -174,23 +176,30 @@ def main():
     if args.all:
         targets = flat
         what = "ALL media"
+        full_wipe = True
     else:                                    # --pick
+        full_wipe = False
         try:
-            sel = input("\n  Which to DELETE? (e.g. 1-3,5  /  'all'  /  q = annuler) : ")
+            sel = input("\n  Which to DELETE? (e.g. 1-3,5  /  'all'  /  q = cancel) : ")
         except EOFError:
             sel = ""
-        if sel.strip().lower() in ("", "q", "quit", "cancel", "annuler"):
-            print(">>> annulé (rien supprimé).")
+        if sel.strip().lower() in ("", "q", "quit", "cancel"):
+            print(">>> cancelled (nothing deleted).")
             return 0
         keep = gd._parse_selection(sel, len(flat))
         targets = [flat[i] for i in sorted(keep)]
         what = "selected clips"
 
-    ok, fail = run_deletion(targets, args.yes, what)
+    ok, fail = run_deletion(targets, args.yes, what, full_wipe)
 
     if ok:
-        remaining = sum(len(gd.media_list(ip)) for _, ip, _ in cams)
-        print(f">>> remaining on card(s): {remaining} clip(s).")
+        try:
+            remaining = sum(len(gd.media_list(ip)) for _, ip, _ in cams)
+            print(f">>> remaining on card(s): {remaining} clip(s).")
+        except Exception as e:
+            # The delete already succeeded; this count is a courtesy. If a camera
+            # drops right now, say so plainly instead of dumping a traceback.
+            print(f">>> remaining on card(s): unknown (a camera became unreachable: {e})")
     return 1 if fail else 0
 
 
