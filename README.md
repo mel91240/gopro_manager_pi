@@ -17,19 +17,34 @@ A **self-contained add-on** to a Pi that already has the base AUV setup (the
 packages and a `gopro_scripts/` folder, changes **no** existing package, and needs
 **no Docker image change**.
 
-**Prerequisites on the Pi:** the `cosma_auv` image, the `~/dev/swarm-vehicle`
-workspace, internet access, `uhubctl`, and the **correct date/time**.
+**Prerequisites on the Pi:**
+- the **`cosma_auv:latest` Docker image** and the **`~/dev/swarm-vehicle` workspace** (the base AUV setup),
+- **internet access** (for `git clone` + `apt` — see "First boot" below),
+- the **correct date/time** (the Pi has no RTC),
+- **`uhubctl`** — the auto-revive watcher power-cycles cameras through it (`sudo apt install -y uhubctl`).
 
-> ⚠️ **Set the clock first.** A freshly flashed Pi with no RTC/NTP can boot with
-> its clock in the past, which makes `apt-get update` and TLS (`git clone`) fail
-> confusingly. Fix it before anything else:
-> ```bash
-> sudo timedatectl set-ntp true                 # if the Pi has internet, or:
-> sudo date -u -s "YYYY-MM-DD HH:MM:SS"          # set UTC manually
-> ```
+### First boot on a freshly flashed Pi — get it online
+
+A fresh image usually boots with **no internet and the wrong clock**, and both
+make `git clone` / `apt` fail confusingly. Sort them out first:
 
 ```bash
-sudo apt update && sudo apt install -y uhubctl
+# 1. connect WiFi for internet (BlueOS / any Pi on NetworkManager -- SSH in over ethernet first):
+sudo nmcli device wifi connect "<SSID>" password "<PASSWORD>" ifname wlan0
+ping -c2 8.8.8.8                              # confirm raw internet works
+
+# 2. set the clock (no RTC -> it resets on every boot):
+sudo timedatectl set-ntp true                 # with internet it self-syncs, or:
+sudo date -u -s "YYYY-MM-DD HH:MM:SS"          # set UTC by hand
+```
+> ⚠️ A **wrong clock breaks TLS**, so `git clone` / `apt update` return confusing
+> errors (and `curl https://…` returns `000`) even when the network is perfectly
+> fine. Fix the clock before blaming the connection.
+
+### Install
+
+```bash
+sudo apt update && sudo apt install -y uhubctl   # auto-revive dependency (not preinstalled on a fresh image)
 git clone https://github.com/mel91240/gopro_manager_pi.git
 cd gopro_manager_pi
 ./install.sh                    # build + host scripts + sudoers + boot services (idempotent)
