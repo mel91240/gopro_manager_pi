@@ -48,6 +48,7 @@ sudo apt update && sudo apt install -y uhubctl   # auto-revive dependency (not p
 git clone https://github.com/mel91240/gopro_manager_pi.git
 cd gopro_manager_pi
 ./install.sh                    # build + host scripts + sudoers + boot services (idempotent)
+./setup.sh                      # REQUIRED for SSD offload: disable UAS for the SSD (plug it in first) -> reboots
 # non-default locations:  GOPRO_WS=/path/to/swarm-vehicle COSMA_IMAGE=myimg:tag ./install.sh
 # update later:           git pull && ./install.sh
 # remove:                 ./uninstall.sh        (footage is never touched)
@@ -59,11 +60,12 @@ in the `cosma_auv` container, installs the host scripts into `gopro_scripts/`, t
 and the auto-revive watcher start on every boot and the cameras arm themselves** --
 no manual step.
 
-> One extra prerequisite for the SSD offload: disable UAS for the SSD by running
-> `./setup.sh` once (with the SSD plugged in). It auto-detects the drive's VID:PID
-> and adds `usb-storage.quirks=<VID:PID>:u` to the kernel cmdline (backup + reboot),
-> so heavy writes don't wedge the Pi 4's shared USB controller. `download.sh` warns
-> if it is missing.
+> ⚠️ **`./setup.sh` is required before the first SSD offload** (run it once, SSD
+> plugged in). It auto-detects the drive's VID:PID and adds
+> `usb-storage.quirks=<VID:PID>:u` to the kernel cmdline (backup, idempotent), then
+> **reboots**. Without it, heavy writes wedge the Pi 4's shared USB controller (the
+> #1 cause of the "cameras drop / SSD falls off the bus" crashes). `download.sh`
+> warns on every run until it is done. After the reboot, re-set the clock (no RTC).
 
 ---
 
