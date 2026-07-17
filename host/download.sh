@@ -61,11 +61,8 @@ detect_ssd(){
 
 # --- Warn if UAS is not disabled (the #1 stability requirement on Pi 4) ---
 check_uas(){
-  if ! grep -qE 'usb-storage\.quirks=[^ ]*:u' /proc/cmdline; then
-    log "WARNING: no 'usb-storage.quirks=<VID:PID>:u' quirk in /proc/cmdline."
-    log "  -> UAS may not be disabled for the SSD; without it the transfer can wedge the VL805."
-    log "  -> Fix: add usb-storage.quirks=<VID:PID>:u to /boot/firmware/cmdline.txt then reboot (see README)."
-  fi
+  grep -qE 'usb-storage\.quirks=[^ ]*:u' /proc/cmdline \
+    || log "! SSD UAS quirk missing -- run ./setup.sh (else heavy writes can wedge the USB controller)."
 }
 
 # --- Ensure the SSD is mounted (fsck it first if it was left dirty by a crash) ---
