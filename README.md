@@ -76,7 +76,7 @@ Everything runs from the scripts in `gopro_scripts/` -- there is no interactive 
 **Recording** -- these talk to the running manager, so its watchdog/EMERGENCY
 logic stays in charge:
 ```bash
-./gopro_ctl.sh record            # start recording on all cameras   (alias: start)
+./gopro_ctl.sh start             # start recording on all cameras   (alias: record)
 ./gopro_ctl.sh stop              # stop
 ./gopro_ctl.sh status            # READY/RECORDING + per-camera SD
 ./gopro_ctl.sh settings resolution=4K fps=30 fov=Linear   # only the fields you pass
@@ -103,7 +103,7 @@ Running `settings` with a wrong/missing value prints the full list of valid opti
 ./manager_up.sh   /   ./manager_down.sh      # manual start/stop (also the service Exec hooks)
 ```
 
-**Typical mission:** power on (cameras auto-arm) → `./gopro_ctl.sh record`, put the
+**Typical mission:** power on (cameras auto-arm) → `./gopro_ctl.sh start`, put the
 AUV in the water, close SSH (the manager keeps running; if a reboot interrupts the
 take it auto-resumes a new segment) → after the dive, `./gopro_ctl.sh stop`,
 `./download.sh` to offload, then `./gopro_delete.py --all` once the footage is safe.
@@ -216,7 +216,7 @@ ros2_pkgs/                  # the ROS half -> built in the cosma_auv container
     nodes/gopro_manager_node.py   # the manager node
   gopro_msgs/      # GoProStatus.msg, GoProSystem.msg, GoProSettings.srv
 host/                        # the HOST half -> installed into gopro_scripts/
-  gopro_ctl.sh              # operator control: record / stop / status / settings / solo / duo
+  gopro_ctl.sh              # operator control: start / stop / status / settings / solo / duo / off / on
   download.sh + gopro_download.py   # offload footage -> SSD (robust, resumable)
   gopro_delete.py           # delete / wipe media on the cameras
   revive.sh                 # auto-revive watcher (--watch); uses host uhubctl
