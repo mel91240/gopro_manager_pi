@@ -20,7 +20,8 @@ stays in charge:
 ./gopro_ctl.sh status            # READY/RECORDING + per-camera SD
 ./gopro_ctl.sh settings resolution=4K fps=30 fov=Linear   # change only the fields you pass
 ./gopro_ctl.sh solo LEFT         # keep one camera, power the other off
-./gopro_ctl.sh duo               # re-enable both
+./gopro_ctl.sh duo               # re-enable both   (alias: on)
+./gopro_ctl.sh off               # power BOTH cameras off (idle, anti-overheat) until 'on'
 ```
 
 Offload / delete / logs:
@@ -30,6 +31,8 @@ Offload / delete / logs:
 ./gopro_delete.py --pick         # delete selected clips   (--all wipes the cards)
 ./manager_log.sh                 # live manager + auto-revive + download logs
 ```
+The manager log stream is also saved to a dated file per manager start in
+`<workspace>/log/gopro/` (see `manager_logfile.sh`); `latest.log` is the current session.
 
 ## Why the manager is decoupled
 
