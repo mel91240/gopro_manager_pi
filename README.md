@@ -81,7 +81,8 @@ logic stays in charge:
 ./gopro_ctl.sh status            # READY/RECORDING + per-camera SD
 ./gopro_ctl.sh settings resolution=4K fps=30 fov=Linear   # only the fields you pass
 ./gopro_ctl.sh solo LEFT         # keep one camera, power the other off
-./gopro_ctl.sh duo               # re-enable both
+./gopro_ctl.sh duo               # re-enable both   (alias: on)
+./gopro_ctl.sh off               # power BOTH cameras off (idle, anti-overheat) until 'on'
 ```
 Running `settings` with a wrong/missing value prints the full list of valid options.
 
