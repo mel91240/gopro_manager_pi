@@ -98,6 +98,7 @@ class GoProManagerNode(Node):
         self.declare_parameter('discovery_timeout', 20.0)            # [s] wait for all cams to enumerate at boot
         self.declare_parameter('resume_on_restart', True)            # auto-resume recording after a reboot
         self.declare_parameter('vbus_recover_after', 3)              # failed soft re-arms before asking the host watcher for a Vbus cycle
+        self.declare_parameter('vbus_recover_unreachable_after', 5)  # HIGHER bar: failed recovery ticks on an HTTP-MUTE-but-on-USB cam before a Vbus cycle (can't confirm SD idle over dead HTTP -> be surer it is not a transient)
         self.declare_parameter('vbus_cooldown', 45.0)                # [s] min between Vbus requests for one camera (cycle+reboot+re-arm)
         self.declare_parameter(                                      # host watcher (revive.sh) polls this for a targeted Vbus cycle
             'vbus_request_file', '/home/cosma_auv/swarm-vehicle/gopro_scripts/.revive_request')
@@ -124,6 +125,7 @@ class GoProManagerNode(Node):
         self.resume_on_restart = bool(self.get_parameter('resume_on_restart').value)
         self.state_file = str(self.get_parameter('state_file').value)
         self.vbus_recover_after = int(self.get_parameter('vbus_recover_after').value)
+        self.vbus_recover_unreachable_after = int(self.get_parameter('vbus_recover_unreachable_after').value)
         self.vbus_cooldown = float(self.get_parameter('vbus_cooldown').value)
         self.vbus_request_file = str(self.get_parameter('vbus_request_file').value)
         self.solo_request_file = str(self.get_parameter('solo_request_file').value)
@@ -890,6 +892,22 @@ class GoProManagerNode(Node):
         self._recover_attempts[cam.label] = self._recover_attempts.get(cam.label, 0) + 1
         if not cam.reachable(timeout=2):
             self.get_logger().warn(f'[{cam.label}] recovering')
+            # #2: an on-bus but HTTP-MUTE camera (answers nothing) never reaches the
+            # brown-out Vbus path below (which needs reachable()), and revive.sh will
+            # not cut an OCCUPIED socket on its own -> without this it would sit in
+            # EMERGENCY forever. If it is still ENUMERATED on USB (present, just mute)
+            # and has stayed unreachable for a sustained spell, ask for a Vbus cycle --
+            # the only cure. Conservative on purpose: a HIGHER attempt bar than the
+            # brown-out (we cannot confirm the SD is idle over dead HTTP, so be surer it
+            # is a real wedge, not a transient), gated on the camera still being on the
+            # bus (a GoPro-count drop = truly off-bus -> revive.sh's own empty-socket
+            # handling has it), plus the shared cooldown + revive.sh's MAX_CYCLES so it
+            # can never loop or hammer a healthy camera.
+            if (cam.can_power_cycle()
+                    and self._recover_attempts.get(cam.label, 0) >= self.vbus_recover_unreachable_after
+                    and _gopros_on_usb() >= (self.expected - len(self._disabled))
+                    and now >= self._vbus_cooldown_until.get(cam.label, 0.0)):
+                self._request_vbus_cycle(cam, now, 'HTTP-mute on USB')
             return
         if cam.recording_now():
             # It is actually recording already (a previous start finally took, or a
@@ -930,11 +948,12 @@ class GoProManagerNode(Node):
         if (cam.can_power_cycle()
                 and self._recover_attempts.get(cam.label, 0) >= self.vbus_recover_after
                 and now >= self._vbus_cooldown_until.get(cam.label, 0.0)):
-            self._request_vbus_cycle(cam, now)
+            self._request_vbus_cycle(cam, now, 'brown-out')
 
-    def _request_vbus_cycle(self, cam, now):
+    def _request_vbus_cycle(self, cam, now, reason='capture-dead'):
         """Ask the host watcher (revive.sh) to Vbus power-cycle this camera's
-        socket -- the only fix for a reachable-but-capture-dead (brown-out) cam.
+        socket -- the only fix for a camera a soft re-arm can't revive (a
+        reachable-but-capture-dead brown-out, or an on-bus-but-HTTP-mute cam).
         Written to a file the host watcher polls; the manager has no Vbus itself."""
         try:
             with open(self.vbus_request_file, 'w') as f:
@@ -947,7 +966,7 @@ class GoProManagerNode(Node):
         # Only now that the request is on disk do we start the cooldown (cycle +
         # cold-boot + re-arm take ~vbus_cooldown s; don't spam the watcher meanwhile).
         self._vbus_cooldown_until[cam.label] = now + self.vbus_cooldown
-        self.get_logger().warn(f'[{cam.label}] power-cycle requested (brown-out)')
+        self.get_logger().warn(f'[{cam.label}] power-cycle requested ({reason})')
 
     # =====================================================================
     # Snapshot + publish
