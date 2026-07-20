@@ -25,6 +25,7 @@ IMAGE="${COSMA_IMAGE:-cosma_auv:latest}"
 
 WS_SRC="$GOPRO_WS/ros2_ws/src"
 SCRIPTS_DST="$GOPRO_WS/gopro_scripts"
+GP_LOG_DIR="$GOPRO_WS/log/gp"   # per-session manager transcripts land here
 PKGS="gopro_msgs gopro_control"
 
 say() { echo ">>> $*"; }
@@ -74,14 +75,17 @@ sudo visudo -cf /etc/sudoers.d/uhubctl >/dev/null || { sudo rm -f /etc/sudoers.d
 
 # 5. systemd services (paths/user injected from the templates -- no hard-coding)
 say "installing systemd services"
-for svc in gopro-manager gopro-autorevive; do
+for svc in gopro-manager gopro-autorevive gopro-logfile; do
     sed -e "s#__GOPRO_SCRIPTS__#$SCRIPTS_DST#g" \
         -e "s#__USER__#$RUN_USER#g" \
         -e "s#__HOME__#$USER_HOME#g" \
+        -e "s#__LOG_DIR__#$GP_LOG_DIR#g" \
         "$REPO/host/systemd/$svc.service.in" | sudo tee "/etc/systemd/system/$svc.service" >/dev/null
 done
 sudo systemctl daemon-reload
-sudo systemctl enable gopro-manager.service gopro-autorevive.service
+# gopro-logfile is WantedBy gopro-manager: enabling it links it into the manager so
+# it starts/stops/restarts with each manager session (one dated transcript each).
+sudo systemctl enable gopro-manager.service gopro-autorevive.service gopro-logfile.service
 # restart (not just --now): on a re-install the manager container is already up,
 # and manager_up.sh is a no-op when it sees a running container -- so without a
 # restart the freshly-built code would not be picked up until the next boot.
@@ -98,5 +102,5 @@ fi
 say "done. The cameras now arm on every boot."
 echo "    control (cli) : $SCRIPTS_DST/gopro_ctl.sh  record | stop | status | settings k=v"
 echo "    SSD offload   : $SCRIPTS_DST/download.sh  (run '$REPO/setup.sh' once first to disable UAS on the SSD, then reboot)"
-echo "    manager logs  : $SCRIPTS_DST/manager_log.sh"
+echo "    manager logs  : $SCRIPTS_DST/manager_log.sh  (live)  |  transcripts: $GP_LOG_DIR/ (one dated file per manager start, latest.log -> current)"
 echo "    remove        : $REPO/uninstall.sh"

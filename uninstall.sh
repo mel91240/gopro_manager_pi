@@ -18,7 +18,7 @@ PURGE=0
 say() { echo ">>> $*"; }
 
 say "stopping + disabling services"
-for svc in gopro-manager gopro-autorevive; do
+for svc in gopro-manager gopro-autorevive gopro-logfile; do
     sudo systemctl disable --now "$svc.service" 2>/dev/null || true
     sudo rm -f "/etc/systemd/system/$svc.service"
 done

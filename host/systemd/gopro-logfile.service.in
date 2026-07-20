@@ -1,0 +1,24 @@
+[Unit]
+Description=GoPro session log transcript (one dated file per manager start)
+# Bound to the manager: PartOf => a stop/restart of gopro-manager propagates
+# here, so every manager (re)start yields exactly one fresh transcript file.
+# Before => this follower starts just ahead of the manager, so `--since=now`
+# captures the manager's very first line ("manager started") too.
+PartOf=gopro-manager.service
+Before=gopro-manager.service
+
+[Service]
+Type=simple
+User=__USER__
+Environment=HOME=__HOME__
+# Paths filled in by install.sh (sed) -- never hard-coded. __LOG_DIR__ is
+# <workspace>/log/gp: transcripts sit next to the workspace's own logs.
+Environment=GOPRO_LOG_DIR=__LOG_DIR__
+ExecStart=__GOPRO_SCRIPTS__/manager_logfile.sh
+Restart=always
+RestartSec=2
+
+[Install]
+# Pulled in by the manager (creates gopro-manager.service.wants/ symlink), so it
+# is never started on its own -- only alongside a manager session.
+WantedBy=gopro-manager.service

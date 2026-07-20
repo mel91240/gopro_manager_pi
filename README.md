@@ -98,6 +98,16 @@ Running `settings` with a wrong/missing value prints the full list of valid opti
 ./manager_log.sh                 # live manager + auto-revive + download logs, in one stream
 ```
 
+The same stream is also **saved to a file, one per manager (re)start**, by the
+`gopro-logfile` service (bound to the manager). Files land in the workspace's
+`log/gp/` folder named `manager_<start-date>.log`, with `latest.log` pointing at
+the current session; only the newest 50 are kept. So every session leaves a
+permanent transcript on disk, even after the manager stops or reloads:
+```bash
+cat  ~/dev/swarm-vehicle/log/gp/latest.log   # transcript of the current session
+ls   ~/dev/swarm-vehicle/log/gp/             # all past sessions, one dated file each
+```
+
 **Manager (normally automatic, boot service):**
 ```bash
 ./manager_up.sh   /   ./manager_down.sh      # manual start/stop (also the service Exec hooks)
@@ -221,7 +231,8 @@ host/                        # the HOST half -> installed into gopro_scripts/
   gopro_delete.py           # delete / wipe media on the cameras
   revive.sh                 # auto-revive watcher (--watch); uses host uhubctl
   manager_up.sh / manager_down.sh / manager_log.sh
-  systemd/                  # gopro-manager / gopro-autorevive service TEMPLATES
+  manager_logfile.sh        # saves each manager session to a dated file in <workspace>/log/gp/
+  systemd/                  # gopro-manager / gopro-autorevive / gopro-logfile service TEMPLATES
 tests/             # automated ROS-interface test suite
 ```
 
