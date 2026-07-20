@@ -1,12 +1,13 @@
 #!/bin/bash
-# Start the GoPro manager (arms the cameras) IN THE FOREGROUND, so that whoever
-# launched it OWNS the container's stdout -- that is what decides where the logs go:
-#   - under systemd (gopro-manager.service): stdout is captured by journald
-#       -> `journalctl -u gopro-manager -f`  (and persisted across reboots).
-#   - by hand in a terminal: the logs stream live; Ctrl-C stops the manager.
+# Start the GoPro manager (arms the cameras). This is the gopro-manager.service
+# ExecStart hook, run IN THE FOREGROUND so systemd owns the container's stdout and
+# captures it into journald -> `journalctl -u gopro-manager -f`, persisted across
+# reboots and shown by ./manager_log.sh.
+#
+# Run BY HAND in a terminal it does NOT stream that firehose at you: it hands off
+# to the systemd service (manager in the background, logs still in journald, prompt
+# back immediately). Set GOPRO_MANAGER_FOREGROUND=1 to force the raw foreground run.
 # Normally started at boot by gopro-manager.service (installed by ./install.sh).
-# (Previously this ran a *detached* `docker run -d`, which handed the logs to
-#  Docker instead of systemd -- so `journalctl` stayed empty. That is the fix.)
 set -e
 
 DIR="$(cd "$(dirname "$0")" && pwd)"   # .../gopro_scripts
@@ -14,6 +15,20 @@ IMAGE="${COSMA_IMAGE:-cosma_auv:latest}"
 WS="${GOPRO_WS:-$(dirname "$DIR")}"     # workspace = parent of gopro_scripts (no hard-coded path)
 NAME=gopro_manager
 
+# Interactive (a human at a terminal) vs systemd (ExecStart, no TTY). When YOU run
+# ./manager_up.sh by hand, don't hijack the terminal with the container's live log
+# stream (and the awkward multi-Ctrl-C to stop it): hand off to the service. The
+# manager runs in the BACKGROUND, its stdout still flows to journald -- so
+# ./manager_log.sh keeps showing everything -- and your prompt returns at once.
+if [ -t 1 ] && [ -z "${GOPRO_MANAGER_FOREGROUND:-}" ] \
+   && command -v systemctl >/dev/null 2>&1 \
+   && systemctl cat gopro-manager.service >/dev/null 2>&1; then
+    sudo systemctl restart gopro-manager.service
+    echo "manager started (background service) -- logs: $DIR/manager_log.sh"
+    exit 0
+fi
+
+# --- Foreground path: systemd's ExecStart (no TTY), or GOPRO_MANAGER_FOREGROUND=1. ---
 # Clear any stale/previous container so `docker run` can reuse the name. We do NOT
 # early-exit if one is already running: a foreground service needs a live process
 # to own, so we always (re)claim the container ourselves.
