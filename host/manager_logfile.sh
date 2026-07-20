@@ -8,7 +8,7 @@
 # with no line cap (the file is the full transcript, not a 60-line tail).
 #
 # Files land in $GOPRO_LOG_DIR -- install.sh sets it (via the service) to
-# <workspace>/log/gp; it falls back to ~/gopro_logs when the script is run
+# <workspace>/log/gopro; it falls back to ~/gopro_logs when the script is run
 # standalone. `latest.log` always points at the current session. Only the newest
 # $GOPRO_LOG_KEEP files are kept, so the SD card never fills with old transcripts.
 set -u

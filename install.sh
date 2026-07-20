@@ -25,7 +25,7 @@ IMAGE="${COSMA_IMAGE:-cosma_auv:latest}"
 
 WS_SRC="$GOPRO_WS/ros2_ws/src"
 SCRIPTS_DST="$GOPRO_WS/gopro_scripts"
-GP_LOG_DIR="$GOPRO_WS/log/gp"   # per-session manager transcripts land here
+GP_LOG_DIR="$GOPRO_WS/log/gopro"   # per-session manager transcripts land here
 PKGS="gopro_msgs gopro_control"
 
 say() { echo ">>> $*"; }

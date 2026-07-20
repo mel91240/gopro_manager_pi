@@ -12,7 +12,7 @@ Type=simple
 User=__USER__
 Environment=HOME=__HOME__
 # Paths filled in by install.sh (sed) -- never hard-coded. __LOG_DIR__ is
-# <workspace>/log/gp: transcripts sit next to the workspace's own logs.
+# <workspace>/log/gopro: transcripts sit next to the workspace's own logs.
 Environment=GOPRO_LOG_DIR=__LOG_DIR__
 ExecStart=__GOPRO_SCRIPTS__/manager_logfile.sh
 Restart=always
