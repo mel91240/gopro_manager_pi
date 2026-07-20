@@ -1099,7 +1099,8 @@ class GoProManagerNode(Node):
         if not self._disabled:
             mode = 'duo (both cameras on)'
         elif len(self._disabled) >= len(self.labels):
-            mode = 'off (all cameras powered off)'
+            off = ', '.join(f'{l} off' for l in self.labels)
+            mode = f'off ({off})'
         else:
             kept = '+'.join(l for l in self.labels if l not in self._disabled)
             off = '+'.join(l for l in self.labels if l in self._disabled)
