@@ -234,7 +234,6 @@ host/                        # the HOST half -> installed into gopro_scripts/
   manager_up.sh / manager_down.sh / manager_log.sh
   manager_logfile.sh        # saves each manager session to a dated file in <workspace>/log/gopro/
   systemd/                  # gopro-manager / gopro-autorevive / gopro-logfile service TEMPLATES
-tests/             # automated ROS-interface test suite
 ```
 
 ---
