@@ -1094,8 +1094,19 @@ class GoProManagerNode(Node):
         names = {GoProSystem.STATE_INITIALIZING: 'INITIALIZING',
                  GoProSystem.STATE_READY: 'READY', GoProSystem.STATE_RECORDING: 'RECORDING',
                  GoProSystem.STATE_DEGRADED: 'DEGRADED', GoProSystem.STATE_FAULT: 'FAULT'}
+        # Solo/duo/off mode, derived from the deliberately-powered-off set so the
+        # operator can see at a glance which cameras are meant to be on.
+        if not self._disabled:
+            mode = 'duo (both cameras on)'
+        elif len(self._disabled) >= len(self.labels):
+            mode = 'off (all cameras powered off)'
+        else:
+            kept = '+'.join(l for l in self.labels if l not in self._disabled)
+            off = '+'.join(l for l in self.labels if l in self._disabled)
+            mode = f'solo {kept} ({off} off)'
         text = (f"state: {names.get(self.state, self.state)}\n"
                 f"message: {self.message}\n"
+                f"mode: {mode}\n"
                 f"recording: {recording_now}/{want}\n"
                 f"cameras_present: {n}\n"
                 f"sd: {sd_info or '-'}\n"
