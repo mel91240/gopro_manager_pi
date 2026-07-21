@@ -62,10 +62,10 @@ systemctl is-active gopro-manager gopro-autorevive gopro-logfile   # 3× "active
 
 **h. Prepare the GoPros — GoPro Labs firmware (once per camera).** The cameras must
 run **GoPro Labs** firmware, version **02.32.70**, set to **auto power-on when USB
-power is applied** and to **assume power is always sufficient** (so they run
-USB-powered, no battery). To flash: put the Labs `update/` folder on the SD card and
-boot the camera, then scan the QR codes for those settings at
-<https://gopro.github.io/labs/control/custom/>.
+power is applied** (`WAKE=2`) and to **trust USB power / assume it is always
+sufficient** (`TUSB=1`, so they run USB-powered, no battery). To flash: put the Labs
+`update/` folder on the SD card and boot the camera, then scan the QR codes for those
+settings (`WAKE=2`, `TUSB=1`) generated at <https://gopro.github.io/labs/control/custom/>.
 
 **i. Wire the cameras.** Plug the **Mega 4 hub** into the Pi and power it (5 V), plug
 the **2 GoPros** into the hub. LEFT and RIGHT are decided by **which port**, not the
