@@ -16,34 +16,27 @@ works.
 
 **a. Flash** the SD card with the latest BlueOS image (verify the write).
 
-**b. Reach the Pi.** BlueOS answers on `192.168.2.2` over ethernet, but the USB-
-ethernet adapter usually lands on another subnet — add a route, then SSH in:
-```bash
-sudo ip addr add 192.168.2.100/24 dev enx00e04c6f118e   # on your PC (re-add if SSH drops)
-ssh pi@192.168.2.2                                       # default password: raspberry
-```
-
-**c. Give the Pi internet** (adapt to your WiFi):
+**b. Give the Pi internet** (adapt to your WiFi):
 ```bash
 sudo nmcli device wifi connect 'wifi_name' password 'wifi_password' ifname wlan0
 ping -c2 8.8.8.8            # internet
 ping -c2 github.com        # + DNS
 ```
 
-**d. Set the clock (UTC).** The Pi has no RTC — the clock resets every boot, and a
+**c. Set the clock (UTC).** The Pi has no RTC — the clock resets every boot, and a
 wrong clock breaks TLS (`git`/`apt` fail with confusing errors):
 ```bash
 sudo timedatectl set-ntp true                  # auto-sync, or set it by hand:
 sudo date -u -s "2026-07-21 08:00:00"          # UTC = French time − 2h in summer
 ```
 
-**e. Install uhubctl** (the auto-revive watcher power-cycles cameras through it):
+**d. Install uhubctl** (the auto-revive watcher power-cycles cameras through it):
 ```bash
 sudo apt update && sudo apt install -y uhubctl
 command -v uhubctl         # prints a path if installed
 ```
 
-**f. Clone + install** (needs the base AUV setup already present: the
+**e. Clone + install** (needs the base AUV setup already present: the
 `cosma_auv:latest` image + the `~/dev/swarm-vehicle` workspace):
 ```bash
 git clone https://github.com/mel91240/gopro_manager_pi.git
@@ -51,7 +44,7 @@ cd gopro_manager_pi
 ./install.sh               # builds the ROS packages, installs the host scripts + boot services
 ```
 
-**g. ⚠️ `setup.sh` — do NOT skip it.** Plug the **SSD into a USB 3.0 port**, then:
+**f. ⚠️ `setup.sh` — do NOT skip it.** Plug the **SSD into a USB 3.0 port**, then:
 ```bash
 ./setup.sh                 # detects the SSD, disables UAS (usb-storage/BOT mode), prints the next step
 sudo reboot                # required for the change to take effect
@@ -59,7 +52,7 @@ sudo reboot                # required for the change to take effect
 Without this, the SSD runs in UAS mode and **drops off the bus mid-offload** (the
 download fails). After the reboot, re-set the clock if NTP hasn't synced.
 
-**h. Verify** (after the reboot):
+**g. Verify** (after the reboot):
 ```bash
 grep -o "usb-storage.quirks=[^ ]*" /proc/cmdline               # the quirk is present
 lsusb -t | grep "Mass Storage"                                 # Driver=usb-storage  (= BOT, NOT uas)
@@ -67,7 +60,7 @@ systemctl is-active gopro-manager gopro-autorevive gopro-logfile   # 3× "active
 ~/dev/swarm-vehicle/gopro_scripts/gopro_ctl.sh status          # READY, ready 2/2
 ```
 
-**i. Wire the cameras.** Plug the **Mega 4 hub** into the Pi and power it (5 V), plug
+**h. Wire the cameras.** Plug the **Mega 4 hub** into the Pi and power it (5 V), plug
 the **2 GoPros** into the hub. LEFT and RIGHT are decided by **which port**, not the
 camera — see the wiring photo. Cameras arm themselves on power-up.
 
