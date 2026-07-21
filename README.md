@@ -176,25 +176,22 @@ The system spans two worlds — **Docker** (where ROS 2 lives) and the **host**
 (where `uhubctl` and the SSD live):
 
 ```
-┌─ Raspberry Pi — HOST (native, no ROS; has uhubctl + the SSD) ───────────────┐
-│                                                                             │
-│  gopro_ctl.sh ──(docker exec: ros2 service call)────────────────┐          │
-│  download.sh / gopro_download.py ──HTTP :8080──► cameras ──► SSD │          │
-│  gopro_delete.py ──────────────── HTTP :8080──► cameras         │          │
-│                                                                 ▼          │
-│  revive.sh (watcher, systemd)   ┌──────── DOCKER (cosma_auv image) ──────┐ │
-│    │  reads .revive_request      │                                       │ │
-│    │  ◄──(a FILE)─────────────── │  gopro_manager  (persistent service)  │ │
-│    ▼                             │    arm · record · watchdog · EMERGENCY│ │
-│  uhubctl ── cuts Vbus on a       └───────────────────────────────────────┘ │
-│  socket that is OFF the bus                                                 │
-│         │                                                                   │
-│  ┌──────────────┐   per-port Vbus (PPPS)                                    │
-│  │   USB hub    │                                                           │
-│  └──────┬───────┘   each GoPro = a USB-Ethernet device at 172.2x.x.51       │
-│    ┌────┴────┐      (wired Open GoPro HTTP API on :8080)                     │
-│   GoPro L   GoPro R                                                          │
-└─────────────────────────────────────────────────────────────────────────────┘
+   gopro_ctl.sh                    (operator control, runs on the HOST)
+        │
+        │  ros2 service call  —  via `docker exec` into the container
+        ▼
+   gopro_manager                   (the "brain", runs in DOCKER / cosma_auv image)
+        │                           arm · record · watchdog · auto-resume · EMERGENCY
+        │
+        │  needs a camera power-cycled?  →  writes  ".revive_request"  (just a file)
+        ▼
+   revive.sh                       (the watcher, runs on the HOST — has uhubctl + SSD)
+        │                           reads the file → uhubctl cuts that socket's USB power
+        ▼
+   USB hub  ──►  GoPro LEFT   +   GoPro RIGHT
+                 each = a USB-Ethernet device · wired Open GoPro HTTP API on :8080
+
+   offload / wipe:  download.sh · gopro_delete.py  ──HTTP :8080──►  cameras  ──►  SSD
 ```
 
 **Why the split:** ROS nodes need the ROS image → Docker; `uhubctl` (USB power) and
@@ -232,13 +229,16 @@ Node `gopro_manager` (private namespace):
 `FAULT` is the **EMERGENCY** signal for the autonomy layer (`state == GoProSystem.STATE_FAULT`).
 
 ```
-   INITIALIZING ──(all cameras armed)──► READY ◄── stop ── RECORDING
-        │ (cameras missing / SD bad)             start ─►     │
-        ▼                                     a camera drops   │ (films again -> clears)
-      FAULT ◄── recovery keeps failing / lost > fault_after_seconds /
-        │        SD unusable / all cameras stopped at once ──► DEGRADED
-        └─► EMERGENCY: the AUV should hold. Recovery is software-first; a real Vbus
-            cycle is requested only for an off-bus / brown-out / HTTP-mute camera.
+   INITIALIZING ──(all armed)──► READY ──start──► RECORDING ──stop──► READY
+      (booting)                                      │
+                                                     │  a camera drops
+                                                     ▼
+                                                  DEGRADED   (recovering; AUV may slow down)
+
+   FAULT / EMERGENCY  →  the AUV should hold. Raised when recovery keeps failing,
+   all cameras drop at once, an SD is unusable, or a camera is lost too long.
+   It self-clears the instant a camera films again. (A real Vbus power-cycle is
+   requested only for an off-bus / brown-out / HTTP-mute camera.)
 ```
 
 **Parameters** (`params/gopro_params.yaml`, loaded at manager (re)start):
