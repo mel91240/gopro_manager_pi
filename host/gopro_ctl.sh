@@ -118,14 +118,31 @@ case "$cmd" in
     settings)
         [ $# -gt 0 ] || { echo "usage: $0 settings key=value ...  (only the fields you want to change)"; settings_help; exit 2; }
         yaml=""
+        hi_res=""
         for kv in "$@"; do
             k="${kv%%=*}"; v="${kv#*=}"
             case "$k" in
                 resolution|fps|fov|hypersmooth|wind_reduction|camera_mode) ;;
                 *) echo "!!! unknown field '$k'"; settings_help; exit 2 ;;
             esac
+            # 5.3K (a.k.a. "5K") draws more than the USB bus can give on this rig,
+            # where the cameras run on USB power with NO BATTERY -> it browns the
+            # camera into a zombie (answers /state, refuses /shutter). Flag it so we
+            # demand an explicit 'y' before sending -- only OK if you added batteries.
+            case "$k=$v" in
+                resolution=5.3K|resolution=5.3k|resolution=5K|resolution=5k) hi_res="$v" ;;
+            esac
             yaml="${yaml}${yaml:+, }${k}: '${v}'"
         done
+        if [ -n "$hi_res" ]; then
+            echo "!!! $hi_res draws more power than the USB bus reliably provides WITHOUT A BATTERY."
+            echo "    On this rig the cameras run USB-powered (no battery), so $hi_res can brown"
+            echo "    a camera out into a zombie (answers /state, refuses /shutter -- needs a"
+            echo "    power-cycle to recover). Only proceed if the cameras are ON BATTERY."
+            printf "    Type 'y' to confirm (anything else aborts): "
+            read -r ans
+            [ "$ans" = "y" ] || { echo "aborted -- settings NOT changed (stayed safe)."; exit 3; }
+        fi
         out="$(svc_call "$NODE/settings" gopro_msgs/srv/GoProSettings "{$yaml}")"
         printf '%s\n' "$out"
         # The manager validates the values/combo (settings.py) and replies
